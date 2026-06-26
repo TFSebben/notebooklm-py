@@ -8,13 +8,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import reprlib
 import weakref
 from typing import TYPE_CHECKING, Any
 
 from .._conversation_cache import ConversationCache
 from .._logging import get_request_id, reset_request_id, set_request_id
+from .._loop_bound import LoopBoundPrimitive
 from .._notebook_metadata import NotebookSourceIdProvider
 from .._request_types import AuthSnapshot
+from .._row_adapters.chat import (
+    ConversationTurnRow,
+    unwrap_conversation_turns,
+    unwrap_last_conversation_id,
+)
+from .._runtime.config import DEFAULT_CHAT_TIMEOUT
 from .._runtime.contracts import LoopGuard, RpcCaller
 from ..exceptions import ChatError, NetworkError, ValidationError
 from .notes import save_chat_answer_as_note
@@ -40,7 +48,13 @@ from ..rpc import (
     RPCMethod,
     safe_index,
 )
-from ..types import AskResult, ChatMode, ChatReference, ConversationTurn, Note
+from ..types import (
+    AskResult,
+    ChatMode,
+    ChatReference,
+    ConversationTurn,
+    Note,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,26 +63,17 @@ def _extract_next_turn_content(next_turn: Any) -> str | None:
     """Extract the response content from a streaming-chat next_turn frame.
 
     The ``khqZz`` (``GET_CONVERSATION_TURNS``) response packs each AI answer
-    as ``turn[4][0][0]`` — three nested wrappers around the answer text. This
-    helper delegates the inner-most descent to :func:`safe_index`, which
-    enforces strict decoding: descent failures raise
+    as ``turn[4][0][0]`` — three nested wrappers around the answer text. The
+    descent goes through :func:`safe_index` under strict decoding (the only
+    mode since the ``NOTEBOOKLM_STRICT_DECODE=0`` opt-out was retired in
+    v0.7.0; rationale in ADR-0011): a genuine descent failure raises
     :class:`~notebooklm.exceptions.UnknownRPCMethodError` so callers fail
-    fast on Google-side shape drift. The legacy
-    ``NOTEBOOKLM_STRICT_DECODE=0`` soft-mode opt-out was retired in v0.7.0.
-    See ADR-011 (``docs/adr/0011-schema-validation-policy.md``) for the
-    rationale.
+    fast on Google-side shape drift.
 
-    Args:
-        next_turn: The candidate answer turn (a ``turn[2] == 2`` row from the
-            ``khqZz`` payload). Caller has already validated this is a list
-            with ``len(next_turn) > 4`` and ``next_turn[2] == 2``.
-
-    Returns:
-        The answer-text string on success, or ``None`` when the leaf at
-        ``[4][0][0]`` descends successfully to a non-string value. A genuine
-        descent failure (shape drift) raises
-        :class:`~notebooklm.exceptions.UnknownRPCMethodError` from
-        :func:`safe_index` — strict decoding is the only mode.
+    ``next_turn`` is a validated answer row (a list with ``len > 4`` and the
+    answer role code — see ``ConversationTurnRow.is_answer``). Returns the
+    answer-text string, or ``None`` when the leaf descends successfully to a
+    non-string value (the caller's empty-answer fallback).
     """
     content = safe_index(
         next_turn,
@@ -90,7 +95,7 @@ def _extract_next_turn_content(next_turn: Any) -> str | None:
     return content
 
 
-class ChatAPI:
+class ChatAPI(LoopBoundPrimitive):
     """Operations for notebook chat/conversations.
 
     Provides methods for asking questions to notebooks and managing
@@ -117,69 +122,54 @@ class ChatAPI:
         transport: RuntimeTransport,
         reqid: ReqidCounter,
         loop_guard: LoopGuard,
+        chat_timeout: float | None = DEFAULT_CHAT_TIMEOUT,
         conversation_cache: ConversationCache | None = None,
         notebooks: NotebookSourceIdProvider | None = None,
     ):
         """Initialize the chat API.
 
-        Per ADR-014 Rule 2 Corollary, ``ChatAPI`` depends on the
-        **direct** collaborators it actually exercises rather than a
-        chat-local Runtime Protocol that bundles them. ``ChatAPI`` takes
-        the four underlying collaborators (``rpc``, ``transport``,
-        ``reqid``, ``loop_guard``) by keyword argument.
+        Per ADR-0014 Rule 2 Corollary, ``ChatAPI`` depends on the **direct**
+        collaborators it exercises (``rpc``, ``transport``, ``reqid``,
+        ``loop_guard``) rather than a chat-local Runtime Protocol bundling them.
 
         Args:
-            rpc: RPC dispatch collaborator (the client's
-                ``internals.executor`` / ``RpcExecutor``) for the
-                ``get_conversation_*``, ``configure``,
-                ``delete_conversation``, and ``save_answer_as_note``
-                round-trips.
-            transport: :class:`RuntimeTransport` collaborator (the client's
-                ``_composed.transport``) that owns the authed-POST entry
-                point used by :meth:`ask` via
-                :func:`chat_aware_authed_post`.
-            reqid: :class:`ReqidCounter` collaborator (the client's
-                ``internals.collaborators.reqid``) that mints the
-                per-attempt ``_reqid`` query parameter for the streamed
-                chat request.
-            loop_guard: :class:`LoopGuard` collaborator (the client's
-                ``internals.collaborators.lifecycle``) whose
-                :meth:`assert_bound_loop` fires before :meth:`ask`
-                acquires the per-conversation lock so a cross-loop
-                follow-up doesn't hang on a lock bound to a dead loop.
+            rpc: RPC dispatch collaborator for the ``get_conversation_*``,
+                ``configure``, ``delete_conversation``, and
+                ``save_answer_as_note`` round-trips.
+            transport: :class:`RuntimeTransport` owning the authed-POST entry
+                point used by :meth:`ask` via :func:`chat_aware_authed_post`.
+            reqid: :class:`ReqidCounter` minting the per-attempt ``_reqid``
+                query parameter for the streamed chat request.
+            loop_guard: :class:`LoopGuard` whose :meth:`assert_bound_loop` fires
+                before :meth:`ask` acquires the per-conversation lock, so a
+                cross-loop follow-up doesn't hang on a lock bound to a dead loop.
+            chat_timeout: Per-read HTTP timeout (seconds) for the streamed chat
+                endpoint. ``None`` inherits the underlying transport timeout.
             conversation_cache: Optional injected cache; defaults to a fresh
-                per-instance ``ConversationCache`` (chat-domain state, no
-                other consumer).
-            notebooks: Optional source-id resolver. Defaults to a
-                ``NotebooksAPI`` wrapper around ``rpc`` so a bare
-                ``ChatAPI(rpc=..., transport=..., reqid=..., loop_guard=...)``
-                still has a default source-id resolver without callers
-                wiring the full NotebooksAPI graph.
+                per-instance ``ConversationCache``.
+            notebooks: Optional source-id resolver; defaults to a
+                ``NotebooksAPI`` around ``rpc`` so a bare ``ChatAPI(...)`` still
+                resolves source ids without callers wiring the full graph.
         """
         self._rpc = rpc
         self._transport = transport
         self._reqid = reqid
         self._loop_guard = loop_guard
+        self._chat_timeout = chat_timeout
         if notebooks is None:
             from .._notebooks import NotebooksAPI
 
             notebooks = NotebooksAPI(rpc)
         self._notebooks = notebooks
         self._cache = conversation_cache if conversation_cache is not None else ConversationCache()
-        # Per-``conversation_id`` lock that serializes follow-up asks on the
-        # same conversation. Without this, two
-        # ``asyncio.gather``'d ``ask`` calls on the same conversation read
-        # identical pre-update history at the top, both POST that history,
-        # then race to append to ``self._cache`` — the server sees two
-        # follow-ups both claiming to be turn N+1 and the local cache loses
-        # one turn's lineage.
+        # Per-``conversation_id`` lock serializing follow-up asks on the same
+        # conversation. Without it, two ``asyncio.gather``'d asks read identical
+        # pre-update history, both POST it, then race to append to ``self._cache``
+        # — the server sees two turn N+1 follow-ups and the cache loses lineage.
         #
-        # ``WeakValueDictionary`` keeps the map bounded automatically:
-        # callers hold a strong reference to the lock while inside
-        # ``async with lock:``; once every waiter releases, the entry GCs
-        # itself and the key is removed. The cost is per-key churn for
-        # one-shot conversations, which is negligible compared to the
-        # round-trip we're protecting.
+        # ``WeakValueDictionary`` keeps the map bounded: a caller holds a strong
+        # ref while inside ``async with lock:``; once all waiters release, the
+        # entry GCs itself. Per-key churn for one-shot conversations is negligible.
         self._conversation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
@@ -191,63 +181,39 @@ class ChatAPI:
         self._new_conversation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
-        # Event-loop binding for the two lazy lock maps above. Captured at
-        # ``ClientLifecycle.open()`` time via :meth:`set_bound_loop` (mirroring
-        # :class:`notebooklm._client_composed.ClientComposed` and
-        # :class:`notebooklm._source.upload.SourceUploadPipeline`). Each lock
-        # in the maps binds to whichever loop is running the first time it is
-        # awaited; if the client is closed on loop A and reopened on loop B, a
-        # stale lock bound to the now-dead loop A must never be reused — see
-        # :meth:`set_bound_loop` / :meth:`reset_after_open`.
-        self._bound_loop: asyncio.AbstractEventLoop | None = None
+        # Event-loop binding for the two lazy lock maps. ``set_bound_loop`` comes
+        # from :class:`~notebooklm._loop_bound.LoopBoundPrimitive`; this API
+        # overrides :meth:`_on_loop_rebind` to clear the maps on a loop change so
+        # a lock bound to a closed loop is never reused after a reopen — see
+        # :meth:`_on_loop_rebind` / :meth:`reset_after_open`.
 
-    def set_bound_loop(self, loop: asyncio.AbstractEventLoop | None) -> None:
-        """Capture or clear the event-loop binding for the conversation locks.
+    def _on_loop_rebind(
+        self,
+        old: asyncio.AbstractEventLoop | None,
+        new: asyncio.AbstractEventLoop | None,
+    ) -> None:
+        """Clear the lazy conversation lock maps when the bound loop changes.
 
-        Called by :meth:`ClientLifecycle.open` after it captures the running
-        loop, mirroring the identically-named method on
-        :class:`notebooklm._client_composed.ClientComposed`,
-        :class:`notebooklm._source.upload.SourceUploadPipeline`,
-        :class:`TransportDrainTracker`, :class:`ReqidCounter`, and
-        :class:`AuthRefreshCoordinator`. Passing ``None`` clears the binding
-        for the next ``open()`` (which rebinds to a fresh loop).
-
-        When the loop actually changes, the two lazy lock maps are cleared
-        here too so this method is self-consistent even if called
-        independently of :meth:`reset_after_open` (e.g. directly in a test or a
-        future caller): a stale ``asyncio.Lock`` bound to the old loop must
-        never be reused after a rebind. The production ``open()`` path also
-        calls :meth:`reset_after_open` immediately after, so the clear is
-        idempotent there.
-
-        The cross-loop guard for :meth:`ask` is the injected
-        ``loop_guard.assert_bound_loop`` (already called at the top of
-        :meth:`ask` before any lock is acquired); this binding only governs
-        when the lazy locks are rebuilt.
+        Fires from ``LoopBoundPrimitive.set_bound_loop`` only on a real loop
+        change (before ``_bound_loop`` updates), so a stale ``asyncio.Lock``
+        bound to the old loop is never reused after a rebind even when called
+        independently of :meth:`reset_after_open`. The cross-loop guard for
+        :meth:`ask` is the injected ``loop_guard.assert_bound_loop``; this hook
+        only governs when the lazy locks are rebuilt.
         """
-        if loop is not self._bound_loop:
-            self._conversation_locks.clear()
-            self._new_conversation_locks.clear()
-        self._bound_loop = loop
+        self._conversation_locks.clear()
+        self._new_conversation_locks.clear()
 
     def reset_after_open(self) -> None:
         """Discard the lazy conversation locks so a reopened client rebinds them.
 
-        Called from :meth:`ClientLifecycle.open` (alongside the
-        per-collaborator ``set_bound_loop`` propagation) so a client that was
-        closed and reopened on a *different* event loop builds fresh
-        ``asyncio.Lock`` instances on the new loop instead of reusing stale
-        ones bound to the old (now-dead) loop. On Python 3.10/3.11 reusing a
-        stale lock can raise "bound to a different event loop" or mispark
-        waiters; on 3.12+ the breakage is largely masked, but resetting keeps
-        the behaviour consistent across versions.
-
-        Mirrors
-        :meth:`notebooklm._source.upload.SourceUploadPipeline.reset_after_open`.
-        Deliberately narrow: clearing the two ``WeakValueDictionary`` maps is
-        enough because each per-key lock is reconstructed lazily on the next
-        :meth:`_get_conversation_lock` / :meth:`_get_new_conversation_lock`
-        call from inside the new loop.
+        Called from :meth:`ClientLifecycle.open` so a client closed and reopened
+        on a *different* event loop builds fresh ``asyncio.Lock`` instances on
+        the new loop instead of reusing stale ones bound to the dead loop (which
+        on 3.10/3.11 can raise "bound to a different event loop" or mispark
+        waiters). Clearing the two ``WeakValueDictionary`` maps suffices — each
+        per-key lock is rebuilt lazily on the next ``_get_*_lock`` call. Mirrors
+        ``SourceUploadPipeline.reset_after_open``.
         """
         self._conversation_locks.clear()
         self._new_conversation_locks.clear()
@@ -255,17 +221,11 @@ class ChatAPI:
     def _get_conversation_lock(self, conversation_id: str) -> asyncio.Lock:
         """Return the (lazily created) lock for ``conversation_id``.
 
-        Single-threaded asyncio means ``WeakValueDictionary.get`` /
-        ``__setitem__`` are atomic w.r.t. coroutine interleaving — no
-        ``await`` between the lookup and the insert, so two concurrent
-        callers on the same conversation either both see the existing lock
-        or one creates it and the other reads it. Either way they share a
-        single lock instance.
-
-        Returning the bare lock (vs. an async-context-manager wrapper) so
-        callers use ``async with self._get_conversation_lock(cid):`` and
-        the strong reference to ``lock`` keeps the WeakValueDictionary
-        entry alive for the duration of the critical section.
+        Single-threaded asyncio makes the ``WeakValueDictionary`` get/set atomic
+        (no ``await`` between lookup and insert), so concurrent callers on the
+        same conversation share one lock instance. The bare lock is returned (not
+        a context-manager wrapper) so the caller's strong ref keeps the entry
+        alive for the critical section.
         """
         lock = self._conversation_locks.get(conversation_id)
         if lock is None:
@@ -319,17 +279,6 @@ class ChatAPI:
             NetworkError / ChatError: If the post-ask ``hPTbtc`` round-trip
                 itself fails (transient network or auth issue). Same
                 logging contract — answer is logged before the raise.
-
-        Example:
-            # New conversation — SDK fetches the real id post-ask via hPTbtc.
-            result = await client.chat.ask(notebook_id, "What is machine learning?")
-
-            # Follow-up — pass the real, hPTbtc-fetched conversation_id back.
-            result = await client.chat.ask(
-                notebook_id,
-                "How does it differ from deep learning?",
-                conversation_id=result.conversation_id
-            )
 
         Note:
             Repeated ``ask()`` calls without ``conversation_id`` all extend
@@ -396,6 +345,8 @@ class ChatAPI:
                     self._transport,
                     build_request=build_request,
                     parse_label="chat.ask",
+                    read_timeout=self._chat_timeout,
+                    disable_read_timeout_retries=True,
                 )
             finally:
                 if reqid_token is not None:
@@ -533,9 +484,8 @@ class ChatAPI:
                 newest-first, so limit=2 gives the latest Q&A pair.
 
         Returns:
-            Raw turn data from API. Each turn has:
-              turn[2] == 1: user question, text at turn[3]
-              turn[2] == 2: AI answer, text at turn[4][0][0]
+            Raw turn data from API; the per-turn position contract lives in
+            :class:`~notebooklm._row_adapters.chat.ConversationTurnRow`.
         """
         logger.debug(
             "Getting conversation turns for %s (conversation=%s, limit=%d)",
@@ -568,18 +518,14 @@ class ChatAPI:
             params,
             source_path=f"/notebook/{notebook_id}",
         )
-        # Response structure: [[[conv_id]]]
+        # Response [[[conv_id]]]: SOFT walk in
+        # ``_row_adapters.chat.unwrap_last_conversation_id`` (None if no row).
         if raw and isinstance(raw, list):
-            for group in raw:
-                if isinstance(group, list):
-                    for conv in group:
-                        if isinstance(conv, list) and conv and isinstance(conv[0], str):
-                            return conv[0]
-            # Promoted from DEBUG to WARNING:
-            # the response shape is the actionable diagnostic when callers
-            # (notably ``ChatAPI.ask`` post-issue-#659) raise ChatError on a
-            # ``None`` return. Truncate to keep log volume bounded; the
-            # ``repr`` keeps the shape visible (lists vs. dicts vs. ints).
+            conversation_id = unwrap_last_conversation_id(raw)
+            if conversation_id is not None:
+                return conversation_id
+            # WARNING (not DEBUG): the shape is the actionable diagnostic when
+            # ``ChatAPI.ask`` raises ChatError on a ``None`` return (issue #659).
             logger.warning(
                 "hPTbtc returned an unexpected response shape; no "
                 "conversation_id extracted (notebook=%s, raw=%r)",
@@ -623,16 +569,11 @@ class ChatAPI:
         except (ChatError, NetworkError) as e:
             logger.warning("Failed to fetch conversation turns for %s: %s", notebook_id, e)
             return []
-        # API returns individual turns newest-first: [A2, Q2, A1, Q1, ...]
-        # Reverse to chronological order [Q1, A1, Q2, A2, ...] so the
-        # Q→A forward-pairing parser works correctly.
-        if (
-            turns_data
-            and isinstance(turns_data, list)
-            and turns_data[0]
-            and isinstance(turns_data[0], list)
-        ):
-            turns_data = [list(reversed(turns_data[0]))]
+        # API returns turns newest-first: [A2, Q2, ...]; reverse to [Q1, A1, ...]
+        # for the Q→A pairer. Unwrap keeps an empty history soft, raises on drift.
+        turns = unwrap_conversation_turns(turns_data, source="_chat.get_history")
+        if turns:
+            turns_data = [list(reversed(turns))]
         return self._parse_turns_to_qa_pairs(turns_data)
 
     @staticmethod
@@ -640,36 +581,49 @@ class ChatAPI:
         """Parse raw turn data into (question, answer) pairs in array order.
 
         Pairs are returned in the same order as the input data (newest-first
-        from the API). Callers should reverse if oldest-first is needed.
-        Each user question (turn[2]==1) is followed by its AI answer (turn[2]==2).
-        """
-        if not turns_data or not isinstance(turns_data, list):
-            return []
-        first = turns_data[0]
-        if not isinstance(first, list):
-            return []
+        from the API); callers reverse if oldest-first is needed. Each user
+        question (role 1) is followed by its AI answer (role 2); per-turn
+        positions live in :class:`~notebooklm._row_adapters.chat.ConversationTurnRow`.
 
-        turns = first
+        Drift handling (#1485): an empty/absent history parses to ``[]``; a
+        truthy-but-malformed payload/container raises ``UnknownRPCMethodError``
+        via ``unwrap_conversation_turns``; a malformed turn row or an
+        unrecognized role code is skipped with a DEBUG diagnostic (ordinary
+        unpaired answer rows are consumed by pairing and never logged).
+        """
+        turns = unwrap_conversation_turns(turns_data, source="_chat._parse_turns_to_qa_pairs")
 
         pairs: list[tuple[str, str]] = []
         i = 0
         while i < len(turns):
-            turn = turns[i]
-            if not isinstance(turn, list) or len(turn) < 3:
+            turn = ConversationTurnRow(turns[i])
+            if not turn.is_well_formed:
+                logger.debug(
+                    "_parse_turns_to_qa_pairs: skipping malformed turn at index %d: %s",
+                    i,
+                    reprlib.repr(turns[i]),
+                )
                 i += 1
                 continue
-            if turn[2] == 1 and len(turn) > 3:
-                q = str(turn[3] or "")
+            if turn.has_unrecognized_role:
+                logger.debug(
+                    "_parse_turns_to_qa_pairs: unrecognized role code %r at turn %d — skipping; "
+                    "possible role-slot drift: %s",
+                    turn.role,
+                    i,
+                    reprlib.repr(turns[i]),
+                )
+                i += 1
+                continue
+            if turn.is_question:
+                q = turn.question_text
                 a = ""
-                # Look for the answer immediately following
+                # Pair with the immediately-following answer turn, if any; a
+                # non-string content leaf yields "" (drift raises in the leaf).
                 if i + 1 < len(turns):
-                    next_turn = turns[i + 1]
-                    if isinstance(next_turn, list) and len(next_turn) > 4 and next_turn[2] == 2:
-                        # A non-string leaf yields ``None`` (empty-answer
-                        # fallback); genuine shape drift raises
-                        # ``UnknownRPCMethodError`` through ``safe_index`` under
-                        # strict decoding (the only mode).
-                        content = _extract_next_turn_content(next_turn)
+                    next_turn = ConversationTurnRow(turns[i + 1])
+                    if next_turn.is_answer:
+                        content = _extract_next_turn_content(next_turn.raw)
                         a = str(content or "")
                         i += 1  # skip the answer turn
                 pairs.append((q, a))
@@ -695,47 +649,48 @@ class ChatAPI:
             for turn in cached
         ]
 
-    async def delete_conversation(self, notebook_id: str, conversation_id: str) -> bool:
+    async def delete_conversation(self, notebook_id: str, conversation_id: str) -> None:
         """Delete a conversation from the server.
 
-        Mirrors the web UI's "Delete history" action. After deletion the
-        next ``ask()`` with no ``conversation_id`` starts a fresh
-        server-side conversation rather than extending the deleted one.
+        Mirrors the web UI's "Delete history" action. After deletion the next
+        ``ask()`` with no ``conversation_id`` starts a fresh server-side
+        conversation rather than extending the deleted one.
 
         Args:
             notebook_id: The notebook that owns the conversation.
             conversation_id: The conversation to delete.
 
         Returns:
-            True on success. The server returns an empty body; any
-            RPC-level error raises before this returns.
+            ``None`` on success; any failure raises first.
+
+        .. versionchanged:: 0.8.0
+            **Breaking change:** returns ``None`` instead of the uninformative
+            always-``True`` value; the ``-> bool`` annotation is dropped (#1290).
         """
         # Catch cross-loop misuse before acquiring the per-conversation lock
-        # below — like ``ask`` does — so a client reused from a different loop
-        # fails fast at the call site instead of hanging on (or rebuilding) a
-        # lock bound to a dead loop. The owner-level ``set_bound_loop`` /
-        # ``reset_after_open`` protocol (#1225) only resets the locks on a
-        # *reopen*; an already-open client driven cross-loop is still rejected
-        # here by the injected guard.
+        # (like ``ask``), so a client reused from another loop fails fast rather
+        # than hang on a dead-loop lock. ``set_bound_loop`` / ``reset_after_open``
+        # (#1225) only reset locks on *reopen*; an open cross-loop client raises.
         self._loop_guard.assert_bound_loop()
         logger.debug("Deleting conversation %s in notebook %s", conversation_id, notebook_id)
-        # Hold the per-``conversation_id`` lock the same way ``ask`` does
-        # for follow-ups, so a concurrent follow-up ``ask`` can't read
-        # pre-delete history, then POST it after the delete has cleared
-        # both server-side state and the local cache.
+        # Hold the per-``conversation_id`` lock like ``ask`` does for follow-ups,
+        # so a concurrent follow-up can't read pre-delete history then POST it
+        # after the delete cleared both server-side state and the local cache.
         async with self._get_conversation_lock(conversation_id):
-            # Param shape captured from web-UI traffic. The trailing 1 is
-            # always observed; its meaning is uncharted — treated as a fixed flag.
+            # DELETE_CONVERSATION is the live ``DeleteChatTurns``: it deletes the
+            # conversation's chat turns (the "Delete history" action), not a
+            # standalone conversation entity.
+            # Param shape from web-UI traffic; trailing 1 is a fixed flag.
             params: list[Any] = [[], conversation_id, None, 1]
             await self._rpc.rpc_call(
                 RPCMethod.DELETE_CONVERSATION,
                 params,
                 source_path=f"/notebook/{notebook_id}",
             )
-            # Clear the cache only after a successful RPC; on failure the
-            # rpc_call above raises and we leave the cache intact for retry.
+            # Clear the cache only after a successful RPC (failure raises above).
             self._cache.clear(conversation_id)
-        return True
+        # v0.8.0 (#1290): the uninformative always-``True`` return becomes ``None``.
+        return None
 
     def clear_cache(self, conversation_id: str | None = None) -> bool:
         """Clear conversation cache.

@@ -4,7 +4,7 @@ Pins the wire contract for the ``J7Gthc`` RPC (params shape, source_path)
 and the local-cache invariant: the per-instance cache is purged only when
 the server-side delete succeeds.
 
-Wave 8 of the session-decoupling plan (ADR-014 Rule 2 Corollary): the
+Wave 8 of the session-decoupling plan (ADR-0014 Rule 2 Corollary): the
 chat-local ``ChatRuntime`` Protocol composite was deleted in favour of
 direct constructor injection of the underlying collaborators. These
 tests use narrow ``MagicMock(spec=...)`` fakes for the two collaborators
@@ -31,9 +31,9 @@ def mock_rpc() -> MagicMock:
     """Narrow ``RpcCaller`` fake — the only collaborator this surface uses.
 
     Constructor injection via ``ChatAPI(rpc=..., transport=..., reqid=...,
-    loop_guard=...)`` satisfies ADR-007 (no post-hoc attribute assignment
+    loop_guard=...)`` satisfies ADR-0007 (no post-hoc attribute assignment
     of an ``AsyncMock`` onto ``rpc_call``); the ``AsyncMock`` is wired
-    into the ``MagicMock(spec=...)`` via its constructor so the ADR-007
+    into the ``MagicMock(spec=...)`` via its constructor so the ADR-0007
     meta-lint stays clean.
     """
     return MagicMock(spec=RpcCaller, rpc_call=AsyncMock(return_value=None))
@@ -55,7 +55,7 @@ def api(mock_rpc: MagicMock) -> ChatAPI:
 class TestDeleteConversation:
     @pytest.mark.asyncio
     async def test_sends_expected_payload(self, api: ChatAPI, mock_rpc: MagicMock) -> None:
-        assert await api.delete_conversation("nb_xyz", "conv_abc") is True
+        assert await api.delete_conversation("nb_xyz", "conv_abc") is None
 
         # Pin the load-bearing args only; the capability adapter's wiring
         # defaults (allow_null, operation_variant, etc.) are covered elsewhere.

@@ -12,7 +12,7 @@ compatibility forward was deleted in Wave 11c of session-decoupling;
 tests now drive the canonical collaborator method directly.
 
 These tests verify the wiring contract from
-ADR-009 §"RpcRequest.context keys":
+ADR-0009 §"RpcRequest.context keys":
 
 1. Both call paths (``RuntimeTransport.perform_authed_post`` directly
    and the ``RpcExecutor._execute_once`` keyword shape) flow through
@@ -32,7 +32,6 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
-from _helpers.client_factory import build_client_shell_for_tests
 from notebooklm._middleware.core import (
     Middleware,
     NextCall,
@@ -42,6 +41,7 @@ from notebooklm._middleware.core import (
 )
 from notebooklm._transport_errors import TransportServerError
 from notebooklm.client import NotebookLMClient
+from tests._helpers.client_factory import build_client_shell_for_tests
 
 
 def _make_core() -> NotebookLMClient:
@@ -77,8 +77,11 @@ class FakeKernelPost:
         *,
         headers: Any,
         body: bytes,
+        read_timeout: float | None = None,
     ) -> httpx.Response:
-        self.calls.append({"url": url, "headers": headers, "body": body})
+        self.calls.append(
+            {"url": url, "headers": headers, "body": body, "read_timeout": read_timeout}
+        )
         return self.response
 
 
@@ -90,9 +93,9 @@ def _swap_kernel_post(core: NotebookLMClient, fake: FakeKernelPost) -> None:
 async def test_chain_routes_perform_authed_post_to_transport() -> None:
     """``RuntimeTransport.perform_authed_post`` flows through the chain.
 
-    Covers direct callers of ``RuntimeTransport.perform_authed_post``:
-    the chat path in ``_chat/transport.py:64`` and any first-party
-    caller via ``client._composed.transport.perform_authed_post``.
+    Covers direct callers of ``RuntimeTransport.perform_authed_post``: the chat
+    path in :func:`notebooklm._chat.transport.chat_aware_authed_post` and any
+    first-party caller via ``client._composed.transport.perform_authed_post``.
     """
     expected_response = httpx.Response(status_code=200, content=b"chain-routed")
     fake = FakeKernelPost(response=expected_response)
@@ -114,6 +117,7 @@ async def test_chain_routes_perform_authed_post_to_transport() -> None:
     assert call["url"] == "https://fake/url"
     assert call["headers"] == {}
     assert call["body"] == b"body"
+    assert call.get("read_timeout") is None
 
 
 @pytest.mark.asyncio
@@ -156,6 +160,7 @@ async def test_chain_routes_rpc_executor_path_to_transport() -> None:
     assert call["url"] == "https://fake/rpc"
     assert call["headers"] == {"X-Goog-AuthUser": "0"}
     assert call["body"] == b"rpc-body"
+    assert call.get("read_timeout") is None
 
 
 @pytest.mark.asyncio
@@ -197,6 +202,7 @@ async def test_chain_terminal_reads_context_keys() -> None:
         "url": "https://fake/ctx",
         "headers": {"X-Test": "yes"},
         "body": b"ctx-body",
+        "read_timeout": None,
     }
 
 
@@ -237,6 +243,7 @@ async def test_chain_terminal_log_label_defaults_for_direct_calls() -> None:
         *,
         headers: Any,
         body: bytes,
+        read_timeout: float | None = None,
     ) -> httpx.Response:
         request = httpx.Request("POST", url, headers=dict(headers), content=body)
         raise httpx.RequestError("boom", request=request)
@@ -255,7 +262,7 @@ async def test_chain_terminal_log_label_defaults_for_direct_calls() -> None:
 
 @pytest.mark.asyncio
 async def test_chain_seeded_with_final_adr_009_ordering() -> None:
-    """``NotebookLMClient.__init__`` seeds the chain with the FINAL ADR-009 ordering.
+    """``NotebookLMClient.__init__`` seeds the chain with the FINAL ADR-0009 ordering.
 
     PR 12.3 landed ``TracingMiddleware`` at the innermost position; PR 12.4
     prepended ``MetricsMiddleware``; PR 12.5 prepended ``DrainMiddleware``
@@ -264,12 +271,12 @@ async def test_chain_seeded_with_final_adr_009_ordering() -> None:
     Metrics and ErrorInjection; PR 12.8 inserted ``AuthRefreshMiddleware``
     between Retry and ErrorInjection; PR 12.9 inserted
     ``SemaphoreMiddleware`` between Metrics and Retry (codex catch — see
-    ADR-009 close-out notes). The list now reads the final ADR-009
+    ADR-0009 close-out notes). The list now reads the final ADR-0009
     ordering
     ``[Drain, Metrics, Semaphore, Retry, AuthRefresh, ErrorInjection, Tracing]``
     (outermost → innermost).
 
-    Order rationale (per ADR-009):
+    Order rationale (per ADR-0009):
     - Drain outermost — every in-flight call counts toward shutdown wait
     - Metrics outside Semaphore — latency includes queue wait
     - Semaphore outside Retry — retry attempts stay in one slot
@@ -304,10 +311,10 @@ async def test_chain_seeded_with_final_adr_009_ordering() -> None:
 async def test_chain_with_test_middleware_observes_request_and_response() -> None:
     """A test middleware can observe the request and response around the leaf.
 
-    Demonstrates the contract every middleware PR 12.3–12.8 will rely on:
-    insert a middleware into the chain, drive a request through, and
-    assert the middleware saw both the inbound request and the outbound
-    response. This is the wire-up smoke test for middleware extractions.
+    Demonstrates the contract middleware components rely on: insert a
+    middleware into a chain, drive a request through, and assert the middleware
+    saw both the inbound request and the outbound response. This is the wire-up
+    smoke test for middleware composition.
 
     Builds the chain locally (rather than mutating ``core._composed.middlewares``
     in-place) because production code does not yet support hot-swapping
@@ -350,6 +357,30 @@ async def test_chain_with_test_middleware_observes_request_and_response() -> Non
     assert result.response is expected_response
     assert fake.call_count == 1
     assert fake.calls[0]["url"] == "https://fake/observe"
+
+
+@pytest.mark.asyncio
+async def test_chain_terminal_forwards_read_timeout_context() -> None:
+    """Per-request read timeout context reaches the concrete streaming POST."""
+    expected_response = httpx.Response(status_code=200, content=b"read-timeout")
+    fake = FakeKernelPost(response=expected_response)
+    core = _make_core()
+    _swap_kernel_post(core, fake)
+
+    request = RpcRequest(
+        url="https://fake/read-timeout",
+        headers={},
+        body=b"",
+        context={
+            "log_label": "read-timeout-test",
+            "read_timeout": 123.0,
+        },
+    )
+
+    result = await core._composed.chain_host._authed_post_chain_terminal(request)
+
+    assert result.response is expected_response
+    assert fake.calls[0].get("read_timeout") == 123.0
 
 
 def test_build_chain_empty_returns_terminal_unchanged() -> None:

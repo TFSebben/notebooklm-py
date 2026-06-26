@@ -140,7 +140,7 @@ class TestRecoveryPreconditions:
 
         # Force ``_try_claim_rotation`` to deny the claim, simulating a sibling
         # caller having just claimed the slot. Patch the local alias on
-        # ``psidts_recovery`` (ADR-007 object-target form) — the recovery path
+        # ``psidts_recovery`` (ADR-0007 object-target form) — the recovery path
         # resolves the symbol via this module's globals at call time.
         monkeypatch.setattr(psidts_recovery, "_try_claim_rotation", lambda _path: False)
 
@@ -324,6 +324,65 @@ class TestPsidtsExpiryGate:
             if c["name"] == "__Secure-1PSIDTS" and c["value"] == "fresh_psidts_value"
         ]
         assert len(fresh) == 1
+
+    @pytest.mark.no_default_keepalive_mock
+    def test_in_memory_split_state_emits_one_row_per_sidts(self, httpx_mock: HTTPXMock):
+        """Split-state recovery must not write a DUPLICATE SIDTS row (issue #1523).
+
+        Trigger: ``__Secure-1PSIDTS`` missing/expired so recovery fires, but a
+        fresh ``__Secure-3PSIDTS`` is already in the source jar. RotateCookies
+        rotates BOTH; the append loop must end with EXACTLY ONE row per
+        ``(name, domain, path)`` carrying the ROTATED value — no second
+        ``__Secure-3PSIDTS`` (or ``__Secure-1PSIDTS``) row that has no analog in
+        any real browser jar.
+        """
+        now = time.time()
+        cookies = [
+            {"name": "SID", "value": "s", "domain": ".google.com", "path": "/"},
+            {"name": "APISID", "value": "a", "domain": ".google.com", "path": "/"},
+            {"name": "SAPISID", "value": "sa", "domain": ".google.com", "path": "/"},
+            # __Secure-1PSIDTS expired → recovery fires.
+            {
+                "name": "__Secure-1PSIDTS",
+                "value": "stale_1psidts",
+                "domain": ".google.com",
+                "path": "/",
+                "expires": now - 3600,
+            },
+            # __Secure-3PSIDTS fresh and already present → would duplicate.
+            {
+                "name": "__Secure-3PSIDTS",
+                "value": "stale_3psidts",
+                "domain": ".google.com",
+                "path": "/",
+                "expires": now + 3600,
+            },
+        ]
+        httpx_mock.add_response(url=_ROTATE_URL_RE, **_make_psidts_response())
+
+        assert psidts_recovery.recover_psidts_in_memory(cookies) is True
+
+        for name, rotated in (
+            ("__Secure-1PSIDTS", "fresh_psidts_value"),
+            ("__Secure-3PSIDTS", "fresh_3psidts_value"),
+        ):
+            rows = [c for c in cookies if c["name"] == name]
+            assert len(rows) == 1, f"{name} duplicated: {rows}"
+            assert rows[0]["value"] == rotated, f"{name} did not carry the rotated value"
+
+        # The resulting storage_state must likewise hold exactly one row each.
+        from notebooklm._auth import cookies as _auth_cookies
+
+        state = _auth_cookies.convert_rookiepy_cookies_to_storage_state(cookies)
+        for name in ("__Secure-1PSIDTS", "__Secure-3PSIDTS"):
+            state_rows = [c for c in state["cookies"] if c["name"] == name]
+            assert len(state_rows) == 1, f"{name} duplicated on disk: {state_rows}"
+
+        # Auth-relevant binding cookies are all still present and correct.
+        names = {c["name"]: c["value"] for c in cookies}
+        assert names["SID"] == "s"
+        assert names["APISID"] == "a"
+        assert names["SAPISID"] == "sa"
 
     @pytest.mark.no_default_keepalive_mock
     def test_in_memory_present_and_fresh_skips_recovery(self, httpx_mock: HTTPXMock):
@@ -738,7 +797,7 @@ class TestLoadAuthFromStorageIntegration:
         usage. The recovery must resolve the same default.
         """
         # Point ``get_storage_path()`` at a tmp file populated with the
-        # recoverable-but-PSIDTS-missing state. Object-form patches (ADR-007
+        # recoverable-but-PSIDTS-missing state. Object-form patches (ADR-0007
         # Form-2) against the live module-object seams so both
         # ``_load_storage_state`` (module-level ``get_storage_path`` in
         # ``_auth.cookies``, reached via the ``psidts_recovery._auth_cookies``
@@ -1056,7 +1115,7 @@ class TestEdgeCases:
 
         # Force the persist step to return False (CAS rejection / I/O error / etc.).
         # Object-form patch against the local ``_auth_storage`` module alias on
-        # ``psidts_recovery`` (ADR-007 Form-2) — the recovery resolves
+        # ``psidts_recovery`` (ADR-0007 Form-2) — the recovery resolves
         # ``_auth_storage.save_cookies_to_storage`` via this module's globals at
         # call time, so patching the alias module object is the live seam.
         fake_save = Mock(return_value=False)
@@ -1074,7 +1133,7 @@ class TestEdgeCases:
         httpx_mock.add_response(url=_ROTATE_URL_RE, **_make_psidts_response())
 
         # Object-form patch against the local ``_auth_storage`` module alias on
-        # ``psidts_recovery`` (ADR-007 Form-2) — the recovery resolves
+        # ``psidts_recovery`` (ADR-0007 Form-2) — the recovery resolves
         # ``_auth_storage.save_cookies_to_storage`` via this module's globals at
         # call time, so patching the alias module object is the live seam.
         fake_save = Mock(side_effect=OSError("simulated disk-full"))
@@ -1104,7 +1163,7 @@ class TestEdgeCases:
             # Simulate another process holding the lock — acquire=False.
             yield False
 
-        # Patch the local alias on ``psidts_recovery`` (ADR-007 object-target
+        # Patch the local alias on ``psidts_recovery`` (ADR-0007 object-target
         # form) — the recovery path resolves ``_file_lock_try_exclusive`` via
         # this module's globals at call time.
         monkeypatch.setattr(psidts_recovery, "_file_lock_try_exclusive", held_lock)
@@ -1151,7 +1210,7 @@ class TestEdgeCases:
             call_counter["n"] += 1
             return pre_heal_state if call_counter["n"] == 1 else post_heal_state
 
-        # Patch the local aliases on ``psidts_recovery`` (ADR-007 object-target
+        # Patch the local aliases on ``psidts_recovery`` (ADR-0007 object-target
         # form) — the recovery path resolves these symbols via this module's
         # globals at call time.
         monkeypatch.setattr(psidts_recovery, "_load_storage_state", staged_load)
@@ -1192,7 +1251,7 @@ class TestEdgeCases:
             call_counter["n"] += 1
             return pre_heal_state if call_counter["n"] == 1 else post_heal_state
 
-        # Patch the local alias on ``psidts_recovery`` (ADR-007 object-target
+        # Patch the local alias on ``psidts_recovery`` (ADR-0007 object-target
         # form) — the recovery path resolves ``_load_storage_state`` via this
         # module's globals at call time.
         monkeypatch.setattr(psidts_recovery, "_load_storage_state", staged_load)
@@ -1222,7 +1281,7 @@ class TestEdgeCases:
             call_counter["n"] += 1
             return pre_heal_state if call_counter["n"] == 1 else post_heal_state
 
-        # Patch the local alias on ``psidts_recovery`` (ADR-007 object-target
+        # Patch the local alias on ``psidts_recovery`` (ADR-0007 object-target
         # form) — the recovery path resolves ``_load_storage_state`` via this
         # module's globals at call time.
         monkeypatch.setattr(psidts_recovery, "_load_storage_state", staged_load)

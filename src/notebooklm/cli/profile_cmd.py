@@ -17,6 +17,12 @@ from pathlib import Path
 import click
 from rich.table import Table
 
+from .._app.profile import (
+    gather_profile_list,
+    is_protected_profile,
+    retarget_default_profile_mutator,
+    set_default_profile_mutator,
+)
 from ..auth import read_account_metadata
 from ..io import atomic_update_json
 from ..paths import (
@@ -40,7 +46,7 @@ email_to_profile_name = login_service.email_to_profile_name
 def _validate_profile_name_or_click(name: str) -> str:
     """Validate ``name`` and translate service errors to ``click.ClickException``.
 
-    The login service raises ``LoginConfigurationError`` (ADR-015 Pattern
+    The login service raises ``LoginConfigurationError`` (ADR-0015 Pattern
     B decoupling) so this command layer owns the Click translation. The
     end-user message preserves the historical wording — error text plus
     a single-sentence hint about the allowed character set.
@@ -106,37 +112,47 @@ def list_cmd(json_output):
         with handle_errors(json_output=True):
             _run_list_cmd(json_output=True)
         return
-    _run_list_cmd(json_output=False)
+    # The text path was previously unwrapped, so a filesystem failure while
+    # enumerating profiles escaped as a raw traceback. Mirror ``switch_cmd``'s
+    # OSError handling for a friendly message + exit 1. (The ``--json`` path
+    # above keeps its ``handle_errors`` envelope, which classifies an unexpected
+    # OSError as the exit-2 ``UNEXPECTED_ERROR`` contract automation relies on.)
+    try:
+        _run_list_cmd(json_output=False)
+    except OSError as e:
+        raise click.ClickException(  # cli-input-validation: profile list filesystem failure
+            f"Failed to list profiles: {e}"
+        ) from None
 
 
 def _run_list_cmd(*, json_output: bool) -> None:
     """List all profiles and their status."""
-    profiles = list_profiles()
-    active = resolve_profile()
+    # The profile/storage/account helpers are read off THIS module's namespace
+    # at call time so the historical ``patch.object(profile_cmd, ...)`` seams
+    # land; the neutral core only joins them into typed rows.
+    entries, active = gather_profile_list(
+        list_profiles=list_profiles,
+        resolve_profile=resolve_profile,
+        get_storage_path=get_storage_path,
+        read_account_metadata=read_account_metadata,
+    )
 
-    if not profiles:
+    if not entries:
         if json_output:
             json_output_response({"profiles": [], "active": active})
             return
         console.print("[yellow]No profiles found. Run 'notebooklm login' to create one.[/yellow]")
         return
 
-    profile_data = []
-    for name in profiles:
-        storage = get_storage_path(profile=name)
-        is_active = name == active
-        authenticated = storage.exists()
-        account_metadata = read_account_metadata(storage)
-        account_email = account_metadata.get("email")
-
-        profile_data.append(
-            {
-                "name": name,
-                "active": is_active,
-                "authenticated": authenticated,
-                "account": account_email if isinstance(account_email, str) else None,
-            }
-        )
+    profile_data = [
+        {
+            "name": e.name,
+            "active": e.active,
+            "authenticated": e.authenticated,
+            "account": e.account,
+        }
+        for e in entries
+    ]
 
     if json_output:
         json_output_response({"profiles": profile_data, "active": active})
@@ -185,7 +201,15 @@ def create_cmd(name):
             f"Profile '{name}' already exists."
         )
 
-    get_profile_dir(name, create=True)
+    # Mirror ``switch_cmd``'s OSError handling: a filesystem failure while
+    # materializing the profile directory (read-only mount, permissions) yields
+    # a friendly message + exit 1 via Click, never a raw traceback.
+    try:
+        get_profile_dir(name, create=True)
+    except OSError as e:
+        raise click.ClickException(  # cli-input-validation: profile create filesystem failure
+            f"Failed to create profile '{name}': {e}"
+        ) from None
     console.print(f"[green]Profile '{name}' created.[/green]")
     console.print(f"[dim]Run 'notebooklm -p {name} login' to authenticate.[/dim]")
 
@@ -218,12 +242,8 @@ def switch_cmd(name):
     # The lock-protected mutator below is the source of truth for the write.
     old_profile = _read_config(config_path).get("default_profile", "default")
 
-    def _set_default(data: dict) -> dict:
-        data["default_profile"] = name
-        return data
-
     try:
-        _atomic_write_config(config_path, _set_default)
+        _atomic_write_config(config_path, set_default_profile_mutator(name))
     except OSError as e:
         raise click.ClickException(  # cli-input-validation: profile config write validation
             f"Failed to update config.json: {e}"
@@ -273,7 +293,9 @@ def delete_cmd(name, yes, confirm):
     # Block deletion of active or configured default profile
     configured_default = read_default_profile() or "default"
     effective_active = resolve_profile()
-    if name in (configured_default, effective_active):
+    if is_protected_profile(
+        name, configured_default=configured_default, effective_active=effective_active
+    ):
         raise click.ClickException(  # cli-input-validation: profile delete active/default validation
             f"Cannot delete active/default profile '{name}'. "
             f"Switch to another profile first with 'notebooklm profile switch <name>'."
@@ -289,7 +311,16 @@ def delete_cmd(name, yes, confirm):
             console.print("[dim]Cancelled.[/dim]")
             return
 
-    shutil.rmtree(profile_dir)
+    # Mirror ``switch_cmd``'s OSError handling: a pure-filesystem failure (a
+    # locked or half-deleted profile directory — common on Windows when the
+    # browser profile is held by AV/the browser) yields a friendly message +
+    # exit 1 via Click, never a raw traceback.
+    try:
+        shutil.rmtree(profile_dir)
+    except OSError as e:
+        raise click.ClickException(  # cli-input-validation: profile delete filesystem failure
+            f"Failed to delete profile '{name}': {e}"
+        ) from None
     console.print(f"[green]Profile '{name}' deleted.[/green]")
 
 
@@ -322,7 +353,18 @@ def rename_cmd(old_name, new_name):
             f"Profile '{new_name}' already exists."
         )
 
-    os.rename(old_dir, new_dir)
+    # Mirror ``switch_cmd``'s OSError handling: a failure moving the profile
+    # directory (a locked browser-profile file held by AV/the browser on
+    # Windows, a cross-device rename) yields a friendly message + exit 1 via
+    # Click, never a raw traceback. The config retarget below only runs once the
+    # directory move succeeded, so a failed rename never leaves a dangling
+    # ``default_profile`` pointer.
+    try:
+        os.rename(old_dir, new_dir)
+    except OSError as e:
+        raise click.ClickException(  # cli-input-validation: profile rename filesystem failure
+            f"Failed to rename profile '{old_name}': {e}"
+        ) from None
 
     # Update config if renamed profile was the effective default. This is
     # always serialized through the locked mutator — there is NO pre-read
@@ -333,28 +375,24 @@ def rename_cmd(old_name, new_name):
     # corrupt config under the same lock (``recover_from_corrupt=True``
     # inside ``_atomic_write_config``).
     config_path = get_config_path()
-    updated = False
-
-    def _retarget_default(current: dict) -> dict:
-        nonlocal updated
-        # Decide under the lock — this is the only read of
-        # ``default_profile`` that matters. Treat a missing key as the
-        # implicit "default" so a fresh install with no config.json still
-        # picks up the rename when the user renamed the default profile.
-        if (current.get("default_profile") or "default") == old_name:
-            current["default_profile"] = new_name
-            updated = True
-        return current
+    # The retarget decision (treating a missing ``default_profile`` key as the
+    # implicit "default") happens under the lock — this is the only read of
+    # ``default_profile`` that matters. The neutral core supplies the mutator
+    # closure + the ``was_updated`` predicate so the CLI keeps only the locked
+    # write + presentation.
+    retarget_mutator, was_updated = retarget_default_profile_mutator(
+        old_name=old_name, new_name=new_name
+    )
 
     try:
-        _atomic_write_config(config_path, _retarget_default)
+        _atomic_write_config(config_path, retarget_mutator)
     except OSError as e:
         console.print(
             f"[yellow]Warning: profile renamed but config.json update failed: {e}[/yellow]\n"
             f"[yellow]Run 'notebooklm profile switch {new_name}' to fix.[/yellow]"
         )
     else:
-        if updated:
+        if was_updated():
             console.print(f"[dim]Updated default profile in config: {old_name} → {new_name}[/dim]")
 
     console.print(f"[green]Profile renamed: {old_name} → {new_name}[/green]")

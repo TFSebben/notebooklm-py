@@ -9,7 +9,7 @@ These tests pin down the strict-decoding contract:
   Strict decoding is the only mode — the legacy
   ``NOTEBOOKLM_STRICT_DECODE=0`` soft-mode opt-out (which returned the
   ``GenerationStatus(status="failed", task_id="")`` sentinel) was retired in
-  v0.7.0; see ADR-011.
+  v0.7.0; see ADR-0011.
 
 Real-shape happy-path coverage for the wire-level flow already exists in
 ``tests/integration/test_artifacts_integration.py::TestParseGenerationResult``
@@ -32,9 +32,9 @@ from notebooklm.rpc import RPCMethod
 @pytest.fixture
 def artifacts_api():
     """Build a minimal ArtifactsAPI for direct parser invocation."""
-    from _fixtures.fake_core import make_fake_core
     from notebooklm._mind_map import NoteBackedMindMapService
     from notebooklm._note_service import NoteService
+    from tests._fixtures.fake_core import make_fake_core
 
     mock_core = make_fake_core(rpc_call=AsyncMock())
     return ArtifactsAPI(

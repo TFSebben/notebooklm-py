@@ -70,13 +70,11 @@ import vcr
 def _load_sibling(module_name: str, file_name: str) -> Any:
     """Load a sibling module under ``tests/`` by file path.
 
-    The ``tests`` directory is not a Python package (no ``__init__.py``), so
-    ``from tests.cassette_patterns import ...`` only works when the repo root
-    happens to be on ``sys.path``. That holds in a fresh REPL but NOT inside
-    pytest's per-module import, where the loader uses an isolated path that
-    omits the repo root. Loading by file path bypasses ``sys.path`` entirely
-    and is the same idiom ``tests/unit/test_cookie_redaction.py`` uses to
-    import this very file.
+    ``from tests.cassette_patterns import ...`` now resolves inside pytest via
+    ``pythonpath = ["."]`` (pyproject, #1482); loading by file path is kept as a
+    ``sys.path``-independent fallback so this module also works when imported
+    outside pytest, the same idiom ``tests/unit/test_cookie_redaction.py`` uses
+    to import this very file.
     """
     spec = importlib.util.spec_from_file_location(
         module_name, Path(__file__).resolve().parent / file_name
@@ -91,6 +89,8 @@ def _load_sibling(module_name: str, file_name: str) -> Any:
 _cassette_patterns = _load_sibling("tests_cassette_patterns", "cassette_patterns.py")
 recompute_chunk_prefix = _cassette_patterns.recompute_chunk_prefix
 scrub_string = _cassette_patterns.scrub_string
+scrub_cookie_header = _cassette_patterns.scrub_cookie_header
+scrub_set_cookie = _cassette_patterns.scrub_set_cookie
 build_synthetic_error_response = _cassette_patterns.build_synthetic_error_response
 synthetic_error_cassette_name = _cassette_patterns.synthetic_error_cassette_name
 SYNTHETIC_ERROR_CASSETTE_PREFIX = _cassette_patterns.SYNTHETIC_ERROR_CASSETTE_PREFIX
@@ -150,9 +150,15 @@ def scrub_request(request: Any) -> Any:
     - URL query parameters (session IDs)
     - Request body (CSRF tokens)
     """
-    # Scrub Cookie header
+    # Scrub Cookie header. ``scrub_string`` runs first for the name-anchored
+    # session-cookie / auth-token patterns and the JSON-shape coverage; then
+    # ``scrub_cookie_header`` makes a NAME-AGNOSTIC pass that clears EVERY
+    # remaining cookie pair's value (the ``_ga`` / ``_gcl_au`` / ``AEC`` class
+    # that is not on the cookie allowlist). Both are idempotent, so the order
+    # is safe and the name-agnostic pass adds coverage without weakening the
+    # existing scrubbing.
     if "Cookie" in request.headers:
-        request.headers["Cookie"] = scrub_string(request.headers["Cookie"])
+        request.headers["Cookie"] = scrub_cookie_header(scrub_string(request.headers["Cookie"]))
 
     # Scrub URL (contains f.sid session parameter)
     if request.uri:
@@ -224,7 +230,7 @@ def scrub_response(response: dict[str, Any]) -> dict[str, Any]:
     by Google's chunked batchexecute responses. Scrubbing frequently changes
     payload length (e.g. ``21_digit_account_id`` -> ``SCRUBBED_USER_ID``); if
     we left the original counts in place the cassette would fail the byte-count
-    assertion in ``tests/unit/test_cassette_shapes.py`` and the decoder's
+    assertion in ``tests/_guardrails/test_cassette_shapes.py`` and the decoder's
     tolerance branch would log a warning on every replay. The helper is a
     no-op on bodies that don't look chunked, so it's safe to call
     unconditionally.
@@ -258,14 +264,38 @@ def scrub_response(response: dict[str, Any]) -> dict[str, Any]:
             rederived = recompute_chunk_prefix(scrubbed)
             body["string"] = rederived
 
-    # Scrub Set-Cookie headers (may contain session tokens)
+    # Scrub Set-Cookie headers (may contain session tokens). ``scrub_string``
+    # runs first for the name-anchored / auth-token patterns; then
+    # ``scrub_set_cookie`` makes a NAME-AGNOSTIC pass that clears the leading
+    # cookie pair's value while preserving the cookie attributes (Path / Domain
+    # / Expires / Secure / HttpOnly / ...). Both passes are idempotent.
     headers = response.get("headers", {})
     if "Set-Cookie" in headers:
         cookies = headers["Set-Cookie"]
         if isinstance(cookies, list):
-            headers["Set-Cookie"] = [scrub_string(c) for c in cookies]
+            headers["Set-Cookie"] = [scrub_set_cookie(scrub_string(c)) for c in cookies]
         elif isinstance(cookies, str):
-            headers["Set-Cookie"] = scrub_string(cookies)
+            headers["Set-Cookie"] = scrub_set_cookie(scrub_string(cookies))
+
+    # Scrub resumable-upload session tokens echoed in response headers. The
+    # ``X-Goog-Upload-(Control-)URL`` values embed ``upload_id=<token>`` (handled
+    # by ``scrub_string``'s upload_id pattern); ``X-GUploader-UploadID`` carries a
+    # bare token with no anchor, so its value is replaced wholesale. Without this
+    # a fresh recording leaks per-upload tokens past ``scrub_response`` (the guard
+    # catches them, but the scrubber should prevent them — not just detect).
+    for _name in ("X-Goog-Upload-URL", "X-Goog-Upload-Control-URL"):
+        if _name in headers:
+            _vals = headers[_name]
+            headers[_name] = (
+                [scrub_string(v) for v in _vals] if isinstance(_vals, list) else scrub_string(_vals)
+            )
+    if "X-GUploader-UploadID" in headers:
+        _vals = headers["X-GUploader-UploadID"]
+        headers["X-GUploader-UploadID"] = (
+            ["SCRUBBED_UPLOAD_ID" for _ in _vals]
+            if isinstance(_vals, list)
+            else "SCRUBBED_UPLOAD_ID"
+        )
 
     return response
 
@@ -441,6 +471,63 @@ def _shape_only(node: Any) -> Any:
     return _LEAF
 
 
+_CREATE_ARTIFACT_RPC_ID = "R7cb6c"
+_CREATE_ARTIFACT_OPTIONS_SENTINEL = {"_CREATE_ARTIFACT_CLIENT_OPTIONS": True}
+_CREATE_ARTIFACT_OLD_CLIENT_OPTIONS = [2]
+_CREATE_ARTIFACT_LIVE_CLIENT_OPTIONS = [
+    2,
+    None,
+    None,
+    [1, None, None, None, None, None, None, None, None, None, [1]],
+    [[1, 4, 8, 2, 3, 6]],
+]
+
+
+def _is_create_artifact_client_options(node: Any) -> bool:
+    """Return whether ``node`` is a known CREATE_ARTIFACT options envelope.
+
+    Older cassettes recorded the compact ``[2]`` first param. Live UI captures
+    on 2026-06-15 send ``[2, None, None, ..., [[1, 4, 8, 2, 3, 6]]]`` instead.
+    Both identify the same client-options slot for matcher purposes; the actual
+    artifact spec remains matched structurally.
+    """
+    if not isinstance(node, list):
+        return False
+    return node in (
+        _CREATE_ARTIFACT_OLD_CLIENT_OPTIONS,
+        _CREATE_ARTIFACT_LIVE_CLIENT_OPTIONS,
+    )
+
+
+def _normalize_create_artifact_options(decoded_outer: Any) -> Any:
+    """Canonicalize old/new CREATE_ARTIFACT client-options shapes for VCR replay."""
+    if not isinstance(decoded_outer, list):
+        return decoded_outer
+
+    normalized_outer: list[Any] = []
+    for batch in decoded_outer:
+        if not isinstance(batch, list):
+            normalized_outer.append(batch)
+            continue
+        normalized_batch: list[Any] = []
+        for entry in batch:
+            if (
+                isinstance(entry, list)
+                and len(entry) >= 2
+                and entry[0] == _CREATE_ARTIFACT_RPC_ID
+                and isinstance(entry[1], list)
+                and entry[1]
+                and _is_create_artifact_client_options(entry[1][0])
+            ):
+                args = list(entry[1])
+                args[0] = _CREATE_ARTIFACT_OPTIONS_SENTINEL
+                normalized_batch.append([entry[0], args, *entry[2:]])
+            else:
+                normalized_batch.append(entry)
+        normalized_outer.append(normalized_batch)
+    return normalized_outer
+
+
 def _normalize_freq_string(body: str) -> str | None:
     """Extract and lightly-normalize the raw ``f.req`` value from a form body.
 
@@ -585,7 +672,7 @@ def _freq_body_matcher(r1: Any, r2: Any) -> bool:
                         else:
                             decoded_batch.append(entry)
                     decoded_outer.append(decoded_batch)
-                return f_req, ("batch", decoded_outer)
+                return f_req, ("batch", _normalize_create_artifact_options(decoded_outer))
             except (TypeError, IndexError):
                 return f_req, None
 

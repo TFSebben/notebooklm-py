@@ -1,7 +1,7 @@
 # Contributing Guide
 
 **Status:** Active
-**Last Updated:** 2026-05-23
+**Last Updated:** 2026-06-11
 
 This guide covers everything you need to contribute to `notebooklm-py`: architecture overview, testing, and releasing.
 
@@ -14,7 +14,8 @@ This guide covers everything you need to contribute to `notebooklm-py`: architec
 ## Architecture
 
 > **Canonical post-refactor map:** see [`docs/architecture.md`](./architecture.md)
-> for the v0.5.0 collaborator graph + capability-protocol model. This section
+> for the current adapter/app/client/runtime/RPC graph and
+> capability-protocol model. This section
 > remains as the contributor on-ramp (package layout + adding-features
 > guidance) and links out to the architecture doc rather than duplicating it.
 
@@ -24,20 +25,23 @@ This guide covers everything you need to contribute to `notebooklm-py`: architec
 src/notebooklm/
 ├── __init__.py          # Public exports
 ├── client.py            # NotebookLMClient main class
-├── auth.py              # Authentication handling
+├── auth.py              # Public auth facade
 ├── types.py             # Dataclasses and type definitions
+├── _app/                # Transport-neutral business logic shared by adapters
 ├── _client_composed.py  # Client-owned composition holder
-├── _runtime_init.py     # Runtime collaborator construction and wiring
+├── _runtime/            # Runtime contracts, config, lifecycle, auth, transport
 ├── _notebooks.py        # NotebooksAPI implementation
 ├── _notebook_metadata.py # Private notebook metadata composition service
 ├── _sources.py          # SourcesAPI implementation
-├── _source_*.py         # Private source services
+├── _source/             # Private source services
 ├── _artifacts.py        # ArtifactsAPI implementation
-├── _artifact_*.py       # Private artifact services
-├── _chat.py             # ChatAPI implementation
+├── _artifact/           # Private artifact services
+├── _chat/               # ChatAPI implementation (facade + chat helpers)
 ├── _research.py         # ResearchAPI implementation
 ├── _notes.py            # NotesAPI implementation
 ├── _mind_map.py         # Private note-backed mind-map service
+├── _mind_maps_api.py    # MindMapsAPI implementation
+├── _labels.py           # LabelsAPI implementation
 ├── _settings.py         # SettingsAPI implementation
 ├── _sharing.py          # SharingAPI implementation
 ├── _sharing_manager.py  # Private legacy notebook share-link service
@@ -46,25 +50,22 @@ src/notebooklm/
 │   ├── types.py         # RPCMethod enum and constants
 │   ├── encoder.py       # Request encoding
 │   └── decoder.py       # Response parsing
-└── cli/                 # CLI implementation
-    ├── __init__.py      # CLI package exports
-    ├── helpers.py       # Shared utilities
-    ├── session.py       # login, use, status, clear
-    ├── notebook.py      # list, create, delete, rename
-    ├── source.py        # source add, list, delete
-    ├── artifact.py      # artifact list, get, delete
-    ├── generate.py      # generate audio, video, etc.
-    ├── download.py      # download audio, video, etc.
-    ├── chat.py          # ask, configure, history
-    └── ...
+├── cli/                 # Click adapter (`*_cmd.py`) plus `cli/services/`
+├── mcp/                 # FastMCP adapter (optional `mcp` extra)
+└── server/              # FastAPI REST adapter (optional `server` extra)
 ```
 
 ### Layered Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                         CLI Layer                           │
-│   cli/session.py, cli/notebook.py, cli/generate.py, etc.    │
+│                      Adapter Layer                          │
+│        cli/ (Click), mcp/ (FastMCP), server/ (FastAPI)       │
+└───────────────────────────┬─────────────────────────────────┘
+                            │
+┌───────────────────────────▼─────────────────────────────────┐
+│                  App Core Layer (`_app/`)                    │
+│        transport-neutral request/plan/result workflows       │
 └───────────────────────────┬─────────────────────────────────┘
                             │
 ┌───────────────────────────▼─────────────────────────────────┐
@@ -88,15 +89,16 @@ src/notebooklm/
 
 | Layer | Files | Responsibility |
 |-------|-------|----------------|
-| **CLI** | `cli/*.py` | User commands, input validation, Rich output |
+| **Adapters** | `cli/`, `mcp/`, `server/` | User commands/tools/routes, transport-specific input/output, auth envelopes |
+| **App core** | `_app/*.py` | Transport-neutral workflows reused by adapters |
 | **Client** | `client.py`, `_*.py` | High-level Python API, returns typed dataclasses |
-| **Runtime** | `client.py`, `_client_composed.py`, `_runtime_init.py`, `_kernel.py`, runtime collaborators | `NotebookLMClient` composition root plus seam-module helpers (HTTP client lifecycle, RPC dispatch, metrics, drain bookkeeping, request-id counter, auth refresh, conversation cache, polling registry, cookie persistence) |
+| **Runtime** | `client.py`, `_client_composed.py`, `_runtime/init.py`, `_kernel.py`, runtime collaborators | `NotebookLMClient` composition root plus seam-module helpers (HTTP client lifecycle, RPC dispatch, metrics, drain bookkeeping, request-id counter, auth refresh, conversation cache, polling registry, cookie persistence) |
 | **RPC** | `rpc/*.py` | Protocol encoding/decoding, method IDs |
 
 #### Runtime seam modules
 
 The client runtime is split across `NotebookLMClient` (composition root),
-`ClientComposed` (holder), `_runtime_init.py` (construction helpers),
+`ClientComposed` (holder), `_runtime/init.py` (construction helpers),
 `_kernel.py` (HTTP client owner), and single-responsibility collaborator
 modules. (The legacy `_core.py` compatibility shim was deleted in v0.5.0;
 callers import directly from the canonical modules.) Each helper exposes
@@ -105,12 +107,14 @@ a narrow Protocol surface so it can be unit-tested against a stub:
 | Module | Class | Responsibility |
 |---|---|---|
 | `_client_composed.py` | `ClientComposed` | Client-owned holder for transport, executor, chain host, middleware metadata, and session collaborator bundle. |
-| `_runtime_init.py` | `ClientInternals` helpers | Validates constructor args, builds collaborators, wires middleware, and binds `ClientComposed`. |
+| `_runtime/init.py` | `RuntimeCollaborators` helpers | Validates constructor args, builds collaborators, wires middleware, and binds `ClientComposed`. |
 | `_client_metrics.py` | `ClientMetrics` | `ClientMetricsSnapshot` counters, queue-wait recorders, `on_rpc_event` async callback. |
 | `_transport_drain.py` | `TransportDrainTracker` | In-flight transport counters, `_TransportOperationToken`, lazy `asyncio.Condition` powering `client.drain(...)`. |
 | `_reqid_counter.py` | `ReqidCounter` | Monotonic `_reqid` counter for chat backend (baseline 100000, step 100000). |
-| `_runtime_auth.py` | `AuthRefreshCoordinator` | Refresh-task lifecycle, refresh lock, `AuthSnapshot` rotation. |
-| `_runtime_lifecycle.py` | `ClientLifecycle` | Loop-affinity guard, `aclose` plumbing, keepalive task wiring. |
+| `_runtime/auth.py` | `AuthRefreshCoordinator` | Refresh-task lifecycle, refresh lock, `AuthSnapshot` rotation. |
+| `_runtime/contracts.py` | Runtime Protocols | Shared capability Protocols: `Kernel`, `RpcCaller`, and `LoopGuard`. Single-consumer capabilities stay local to their owner modules. |
+| `_runtime/lifecycle.py` | `ClientLifecycle` | Loop-affinity guard, `aclose` plumbing, keepalive task wiring. |
+| `_runtime/transport.py` | `RuntimeTransport` | Authenticated transport leg used by `RpcExecutor` and the middleware chain terminal. |
 | `_rpc_executor.py` | `RpcExecutor` | RPC dispatch executor with direct collaborator dependencies. |
 | `_request_types.py` | `AuthSnapshot`, `BuildRequest`, request materialization | Shared request construction Interface. |
 | `_transport_errors.py` | transport exceptions, `parse_retry_after`, `raise_mapped_post_error` | Terminal `Kernel.post` error mapping for middleware retry/auth behavior. |
@@ -120,20 +124,21 @@ a narrow Protocol surface so it can be unit-tested against a stub:
 | `_cookie_persistence.py` | `CookiePersistence` | Cookie-jar → storage-state serialization, `__Secure-1PSIDTS` rotation. |
 
 The feature-facing surface is the set of **capability Protocols** in
-`notebooklm._runtime_contracts` — `RpcCaller`, `LoopGuard`,
-`OperationScopeProvider`, `AsyncWorkRuntime`, plus the standalone
-`AuthMetadata` and `Kernel` consumed by the upload pipeline. The
-broad `Session` Protocol that previously bundled these together was
-deleted in the final phase of the capability refactor (see
-[`docs/refactor-history.md`](refactor-history.md) and ADR-013); each
-feature now depends on the narrowest slice it needs and takes those
-collaborators by keyword-only constructor argument. The feature-local
-composite-runtime Protocols (`ChatRuntime`, `ArtifactsRuntime`,
-`UploadRuntime`) and their adapter dataclasses that previously bundled
-three capability Protocols apiece were retired once it was clear they
-only hid three stable collaborators with one production satisfier; see
-ADR-013 for the promotion criterion (≥2 consumers) that still gates
-adding any new shared Protocol.
+`notebooklm._runtime.contracts` — `Kernel`, `RpcCaller`, and
+`LoopGuard`. Single-consumer capability shapes stay in the owning
+feature module (`AuthMetadata` in `_source/upload.py`,
+`OperationScopeProvider` in `_artifact/polling.py`), and the unused
+`AsyncWorkRuntime` composite was deleted. The broad `Session` Protocol
+that previously bundled these together was deleted in the final phase
+of the capability refactor (see [`docs/refactor-history.md`](refactor-history.md)
+and ADR-0013); each feature now depends on the narrowest slice it needs
+and takes those collaborators by keyword-only constructor argument. The
+feature-local composite-runtime Protocols (`ChatRuntime`,
+`ArtifactsRuntime`, `UploadRuntime`) and their adapter dataclasses that
+previously bundled three capability Protocols apiece were retired once
+it was clear they only hid stable collaborators with one production
+satisfier; see ADR-0013 for the promotion criterion (at least two
+production consumers) that still gates adding any new shared Protocol.
 
 Private service modules sit inside the client layer but below the public
 facades. They own cross-facade composition without importing sibling facades:
@@ -145,28 +150,42 @@ services.
 
 ### Boundary Guardrails
 
+These are the same family as the *Architecture & invariant gates* (`tests/_guardrails/`)
+described below. The **pure** ones (e.g. `test_cli_boundary.py`) have been
+consolidated into `tests/_guardrails/`; the **hybrids** that pair a gate with
+behavioral tests (e.g. `test_public_shims.py`) keep their behavioral half in
+`tests/unit/` and split the gate half into a dedicated `tests/_guardrails/`
+file.
+
 The architecture tests encode the current layer contract:
 
-- `tests/unit/test_public_shims.py` has a documented public import manifest.
-  When a docs change adds or removes a supported import path, update the
-  manifest in the same PR so public API drift is intentional and reviewable.
-- `tests/unit/test_cli_boundary.py` parses `src/notebooklm/cli/**/*.py` and
-  rejects CLI imports from `notebooklm._*`, `notebooklm.rpc.*`, or `_private`
-  names exposed by public modules. Promote needed symbols through a public
-  facade (`notebooklm.types`, `notebooklm.auth`, `notebooklm.research`, etc.)
-  before using them from the CLI.
+- `tests/_guardrails/test_public_surface_manifest.py` has a documented public
+  import manifest. When a docs change adds or removes a supported import path,
+  update the manifest in the same PR so public API drift is intentional and
+  reviewable. The behavioral half of the public-shim suite (the
+  `select_cited_sources` / `ResearchAPI` back-compat delegations, the
+  `UnknownTypeWarning` filter behaviour, and `NotebookLMClient.rpc_call`
+  forwarding) stays in `tests/unit/test_public_shims.py`.
+- `tests/_guardrails/test_cli_boundary.py` parses `src/notebooklm/cli/**/*.py`
+  and rejects CLI imports from `notebooklm._*`, `notebooklm.rpc.*`, or
+  `_private` names exposed by public modules. Promote needed symbols through a
+  public facade (`notebooklm.types`, `notebooklm.auth`, `notebooklm.research`,
+  etc.) before using them from the CLI.
 - Auth internals may move under `notebooklm._auth` during architecture work,
   but first-party callers continue to import through `notebooklm.auth`. The
-  compatibility manifest in `tests/unit/test_public_shims.py` enforces the
-  current first-party surface for that move; it is not a broader public API
-  decision, and removing a listed name needs a separate deprecation plan.
-- `tests/unit/test_init_order.py` guards the notebook-composition
-  boundaries: `NotebookLMClient` constructs `SourcesAPI` before `NotebooksAPI`
-  and passes it through the legacy `sources_api=` slot; notebook metadata
-  services must not import or construct `SourcesAPI`; artifact/source/notebook
-  composition services must not runtime-import facade APIs.
-  Add new private services to those guard lists when they take ownership of
-  cross-facade behavior.
+  compatibility manifest in `tests/_guardrails/test_public_surface_manifest.py`
+  enforces the current first-party surface for that move; it is not a broader
+  public API decision, and removing a listed name needs a separate deprecation
+  plan.
+- `tests/_guardrails/test_no_facade_reach_in.py` holds the AST reach-in /
+  runtime-import boundary gates: notebook metadata services must not import or
+  construct `SourcesAPI`; artifact/source/notebook composition services must
+  not runtime-import facade APIs. Add new private services to those guard
+  lists when they take ownership of cross-facade behavior. The construction /
+  init-order behaviour tests — `NotebookLMClient` constructs `SourcesAPI`
+  before `NotebooksAPI` and passes it through the legacy `sources_api=` slot,
+  plus the mind-map decoupling flows — stay in
+  `tests/unit/test_init_order.py`.
 
 ### Key Design Decisions
 
@@ -195,24 +214,27 @@ from those catalogues rather than introducing parallel patterns.
 **New API Class:**
 1. Create `_newfeature.py` with `NewFeatureAPI` class.
 2. Type each constructor parameter against the **narrowest shared
-   capability Protocol** it actually uses (`RpcCaller`,
-   `AsyncWorkRuntime`, etc. — see
+   capability Protocol** it actually uses (`RpcCaller`, `LoopGuard`,
+   `Kernel` — see
    [`docs/architecture.md`](./architecture.md) for the protocol
-   catalog). Pass each collaborator by keyword-only argument; do not
-   bundle them into a feature-local composite-runtime Protocol unless a
-   second consumer materialises. **Do NOT depend on a broad runtime
-   facade for type annotations** — there is no concrete `Session` class
-   (the broad `Session` Protocol was deleted; see ADR-013). Depend on the
-   narrow capability Protocols in `_runtime_contracts` instead.
-3. Add to `client.py`: wire each collaborator explicitly from the
-   composition root (e.g. `self.newfeature = NewFeatureAPI(rpc=internals.executor,
-   ...)`, where `internals = compose_client_internals(...)`). The concrete
-   collaborator instances on `ClientInternals.collaborators` structurally
-   satisfy every capability Protocol, so the wiring stays straightforward.
-4. **Tests** should use `tests/_fixtures/fake_core.py:FakeSession`
-   which exposes the union of all capability protocols — it lets a
-   feature test substitute the broad runtime without constructing a
-   real client.
+   catalog). If the capability has only one consumer, define the
+   Protocol locally beside that consumer instead of promoting it to
+   `_runtime/contracts.py`. Pass each collaborator by keyword-only
+   argument; do not bundle them into a feature-local composite-runtime
+   Protocol unless a second production consumer materialises. **Do NOT
+   depend on a broad runtime facade for type annotations** — there is no
+   concrete `Session` class (the broad `Session` Protocol was deleted;
+   see ADR-0013).
+3. Add the wiring in `_client_assembly.py::_assemble_client(...)`, not
+   directly in `client.py`. The assembly seam is shared by
+   `NotebookLMClient.__init__` and the canonical test factory; set every
+   constructor-time attribute there and thread concrete collaborators
+   from `compose_client_internals(...)`.
+4. **Tests** should inject the narrow collaborator the feature actually
+   needs. `tests/_fixtures/fake_core.py:FakeSession` remains available
+   for legacy broad-fixture tests, but new direct feature tests should
+   prefer `MagicMock(spec=RpcCaller, rpc_call=AsyncMock(...))`-style
+   fakes or local protocol fakes.
 5. Export types from `__init__.py`.
 
 ---
@@ -232,10 +254,10 @@ left on disk after release — `filelock` reuses them).
 
 | Lock file | Owner | Scope | Acquisition |
 |---|---|---|---|
-| `<profile>/storage_state.json.lock` | `auth.save_cookies_to_storage` (`auth.py:1935`) | Read-merge-write of `storage_state.json` (cookie sync after a rotation or 302) | Blocking exclusive |
-| `<profile>/.storage_state.json.rotate.lock` | `auth._poke_session` (`auth.py:2817`) | Cross-process dedup of the `accounts.google.com/RotateCookies` keepalive POST | Non-blocking exclusive (`LOCK_NB`); skip on contention |
-| `<home>/.migration.lock` | `migration.migrate_to_profiles` (`migration.py:28`) | One-shot legacy→profile layout migration on startup | Blocking exclusive, 30s timeout (raises `MigrationLockTimeoutError`) |
-| `<profile>/context.json.lock` | `cli.helpers.set_context` / `clear_context` via `_atomic_io.atomic_update_json` (`_atomic_io.py:136`) | Read-modify-write of the active-notebook/account-routing context for a profile | Blocking exclusive, 10s timeout |
+| `<profile>/storage_state.json.lock` | `_auth/storage.py::save_cookies_to_storage` | Read-merge-write of `storage_state.json` (cookie sync after a rotation or 302) | Blocking exclusive |
+| `<profile>/.storage_state.json.rotate.lock` | `_auth/keepalive.py::_poke_session` | Cross-process dedup of the `accounts.google.com/RotateCookies` keepalive POST | Non-blocking exclusive (`LOCK_NB`); skip on contention |
+| `<home>/.migration.lock` | `migration.py::migrate_to_profiles` | One-shot legacy→profile layout migration on startup | Blocking exclusive, 30s timeout (raises `MigrationLockTimeoutError`) |
+| `<profile>/context.json.lock` | `_atomic_io.py::atomic_update_json` through CLI context helpers | Read-modify-write of the active-notebook/account-routing context for a profile | Blocking exclusive, 10s timeout |
 
 Design notes:
 
@@ -253,7 +275,7 @@ Design notes:
   the sentinel across invocations, so cleanup is not required — and a
   TOCTOU race between unlink and reacquire is avoided.
 - **In-process serializers complement, not replace, file locks.**
-  `auth._poke_session` also takes an `asyncio.Lock` keyed on
+  `_auth/keepalive.py::_poke_session` also takes an `asyncio.Lock` keyed on
   `(event_loop, profile)` to dedupe an `asyncio.gather` fan-out before
   reaching the cross-process flock — the file lock only sees one
   contender per process per rate-limit window.
@@ -354,6 +376,10 @@ NOTEBOOKLM_READ_ONLY_NOTEBOOK_ID=<work-nb-id> \
 ```
 tests/
 ├── unit/                            # No network, fast, mock everything
+├── _guardrails/                     # Architecture/invariant gates (custom AST + filesystem lint)
+├── _baselines/                      # Regenerable-baseline registry (ADR-0022): derive/store/compare
+├── fixtures/
+│   └── baselines/                   # Committed derived baselines (types_all.json, ungated_surface.json)
 ├── integration/                     # Mocked HTTP responses + VCR cassettes
 │   ├── test_artifacts_integration.py # ArtifactsAPI integration
 │   ├── test_artifacts_drift.py      # CREATE_ARTIFACT payload drift guard
@@ -392,6 +418,105 @@ The `*_drift.py` tests are payload-shape canaries: they decode a recorded
 RPC response (or assemble a synthetic one) and assert the live decoder still
 produces the expected dataclass. They fail loudly when Google changes a
 payload field, so the failure shows up here before users hit it.
+
+### Architecture & invariant gates (`tests/_guardrails/`)
+
+`tests/_guardrails/` holds the project's **custom lint gates** — pytest tests that
+enforce architectural decisions a general-purpose linter can't express. They are
+not style checks; each file encodes one project-specific invariant, usually the
+executable half of an ADR ("enforce, don't document" — un-enforced consistency
+is the failure mode this directory exists to prevent).
+
+**What belongs here vs `tests/unit/`.** This directory is the home for a *pure*
+gate — a file whose whole purpose is enforcing a repo-wide invariant, with no
+module-under-test. A unit test that only *embeds* a boundary assertion among
+behavioral checks stays in `tests/unit/` (see *Boundary Guardrails* above). Pure
+architecture gates — e.g. `test_cli_boundary.py`, `test_cassette_shapes.py`,
+`test_public_surface.py` — have been consolidated into this directory; the gate
+halves of former hybrids live alongside them (e.g.
+`test_public_surface_manifest.py`, `test_no_facade_reach_in.py`).
+
+**How they differ from ruff / mypy.** Ruff and mypy run in the `quality` job and
+enforce *generic* rules (style, unused imports, types) from a fixed catalogue.
+The `tests/_guardrails/` gates are collected by the normal `uv run pytest` run and
+enforce *bespoke* rules by doing their own analysis: most parse the source with
+`ast.parse` (or scan files with regex / `rglob`), and some **import the module and reflect on
+the live object** — something a purely-static linter cannot do.
+
+A representative slice (run `ls tests/_guardrails/` for the full set):
+
+| Gate | Enforces |
+|---|---|
+| `test_no_raw_positional_rpc_indexing.py` | No chained positional indexing (`x[0][9][3]`) of `batchexecute` payloads outside the sanctioned `_row_adapters/` — the project's #1 fragility class |
+| `test_rpc_method_ids_only_in_types.py` | Obfuscated RPC IDs live only in `rpc/types.py` (the source of truth) |
+| `test_no_forbidden_monkeypatches.py` | The forbidden monkeypatch shapes under `tests/` (ADR-0007) |
+| `test_no_inline_deprecation_warnings.py` | No inline `warnings.warn(..., DeprecationWarning)` outside `_deprecation.py` (ADR-0018) |
+| `test_cli_rpc_envelope.py` | Every *RPC-touching* Click leaf command (call graph reaches `NotebookLMClient`) routes its errors into the JSON envelope |
+| `test_module_size_ratchet.py` | No module grows past the size budget (ADR-0008) — a burn-down ratchet |
+| `test_v080_release_gate.py` | The v0.8.0 breaking-change set flips in lockstep at the version bump |
+| `test_adr_reference_format.py` | ADR references are 4-digit and resolve to a real `docs/adr/NNNN-*.md` |
+| `test_cli_boundary.py` | CLI modules import only public `notebooklm` surface — no `notebooklm._*` / `notebooklm.rpc.*` / `_private` reach-in |
+| `test_no_facade_reach_in.py` | Feature APIs and service modules don't reach into Session internals or runtime-import facade APIs |
+| `test_public_surface_manifest.py` | The documented public-import manifest + re-export identity pins for `notebooklm` / `auth` / `types` / shims stay intact |
+
+**Conventions when adding a gate:**
+
+- **One invariant per file**, with a module docstring that states the rule, *why*
+  it matters (cite the ADR), and how a violation is fixed. The assertion message
+  is the contributor's first — and often only — explanation, so make it
+  actionable.
+- **Make the detector a pure function and self-test it** against known good/bad
+  inputs in the same file, so the gate can't silently become vacuous (a regex
+  that matches nothing must fail its own self-test, not pass everything).
+- **Shrink-only allowlists.** A gate that would fail on pre-existing violations
+  may grandfather them in an allowlist — but it must be a *one-way ratchet* that
+  only shrinks (e.g. `test_module_size_ratchet.py`,
+  `tests/scripts/check_method_coverage.py`). The rule lands without a giant
+  cleanup PR, and the gate fails when an allowlisted entry becomes clean so it
+  gets removed.
+- **Scan yourself too.** A gate that shows the *wrong* form in its examples
+  should use placeholders (or build them at runtime) rather than excluding its
+  own file, so it still polices its own references
+  (`test_adr_reference_format.py`).
+
+Most gates are fast and run in the normal loop; the slow repo-wide cassette scan
+(`test_cassettes_clean.py`) carries the `repo_lint` marker (see
+[Quick Reference](#quick-reference)).
+
+**Trade-off.** Because some gates import internals and reflect on them, they
+couple more tightly to implementation than a static linter — a
+behavior-preserving refactor can still trip one. That coupling is deliberate: it
+catches architecture drift that ruff and mypy structurally cannot see.
+
+### Updating baselines
+
+Some gates freeze a *snapshot* of a value the code already derives, so a public
+surface change is a deliberate, diff-visible act. These **regenerable baselines**
+(ADR-0022) are registered in `tests/_baselines/registry.py` and committed under
+`tests/fixtures/baselines/` (plus the CLI contract at
+`tests/fixtures/cli_contract_baseline.json`):
+
+| Baseline | Derives from | Committed file |
+|---|---|---|
+| `types_all` | `notebooklm.types.__all__` | `tests/fixtures/baselines/types_all.json` |
+| `ungated_surface` | collected `__all__` of each ungated public module | `tests/fixtures/baselines/ungated_surface.json` |
+| `cli_contract` | `build_cli_contract()` | `tests/fixtures/cli_contract_baseline.json` |
+
+The freeze test `test_baseline_matches_committed_file` (in
+`tests/_guardrails/test_public_surface_manifest.py`) asserts each committed file
+equals `derive()`. When you intentionally change a public surface — e.g. add an
+export to `notebooklm.types.__all__` or a CLI option — that test fails. Regenerate
+the committed files in the **same PR**:
+
+```bash
+python scripts/regen_baselines.py
+git diff tests/fixtures/baselines tests/fixtures/cli_contract_baseline.json
+```
+
+Review the diff — each changed line is the deliberate acknowledgement of the
+surface change. Regen is **dev-only**: it shells `pytest … --update-baselines`,
+which both the wrapper and the `update_baselines` fixture refuse to run when a
+`CI` environment is detected. **CI never regenerates — it only diffs.**
 
 ### VCR Testing (Recorded HTTP)
 
@@ -487,6 +612,38 @@ the result with the cassette guard before committing:
 # Verify recorded cassettes are clean of credentials
 uv run python tests/scripts/check_cassettes_clean.py
 ```
+
+#### Long-running recordings (deep research, multi-minute polling)
+
+Recording a cassette that polls a multi-minute server-side operation — the Deep
+Research lifecycle (`test_research_deep_poll_vcr.py`) is the canonical example —
+hits a few non-obvious snags. Lessons from the v0.8 full-lifecycle re-record
+(PR #1566):
+
+- **`httpx.PoolTimeout` after ~15–20 min of idle polling.** The default
+  `ConnectionLimits(keepalive_expiry=30.0)` keeps an idle pooled connection
+  around long enough to be silently dropped server-side, and the next acquire
+  stalls. In **record mode only**, build the client with a shorter keepalive and
+  a generous read timeout:
+  `NotebookLMClient(auth, timeout=60.0, limits=ConnectionLimits(keepalive_expiry=10.0))`.
+  Note `async_client_factory` is **not** a public constructor kwarg — use the
+  public `timeout=` / `limits=` seams.
+- **`pytest-timeout` kills the run.** The global per-test timeout aborts a
+  ~30-min recording. Mark the recording test `@pytest.mark.timeout(3600)`.
+- **`start()` task_id ≠ the poll-reported task_id.** Deep Research's kickoff id
+  is not the id `POLL_RESEARCH` echoes back, so a filtered
+  `research.poll(task_id=…)` returns `NOT_FOUND` every poll. The record loop must
+  mirror `wait_for_completion`: first poll unfiltered, then pin the
+  *poll-reported* id.
+- **Trim with a byte-exact text slice, not `yaml.safe_dump`.** Long deep-research
+  poll bodies accumulate large markdown, so trim redundant middle `in_progress`
+  polls to stay under the cassette size cap. Re-serializing via `yaml.safe_dump`
+  re-wraps long scalars and breaks Windows YAML parsing (CI catches it) — slice
+  the VCR-native YAML text instead.
+- **Cleanliness is necessary-not-sufficient.** After recording, run the cassette
+  guard (above) *and* manually grep the new file for live cookie/token/email
+  shapes (`SID` / `HSID` / `SAPISIDHASH` / Bearer / the account email) — the
+  name-anchored scrubber can miss credentials in un-allowlisted fields.
 
 #### Synthetic error cassettes
 

@@ -1,11 +1,11 @@
-"""Composes the ADR-009 middleware chain.
+"""Composes the ADR-0009 middleware chain.
 
 The chain wraps ``Kernel.post`` through
 ``MiddlewareChainHost._authed_post_chain_terminal`` (the shared seam
 covering ``RuntimeTransport.perform_authed_post`` and
 ``RpcExecutor._execute_once``'s dispatch into the transport).
 
-The ADR-009 ordering is ``[Drain, Metrics, Semaphore, Retry, AuthRefresh,
+The ADR-0009 ordering is ``[Drain, Metrics, Semaphore, Retry, AuthRefresh,
 ErrorInjection, Tracing]`` (outermost → innermost). ``build_chain``
 composes the leftmost entry as the outermost wrapper, so keeping
 ``TracingMiddleware`` at the RIGHT end of the list preserves Tracing as
@@ -23,7 +23,7 @@ refresh-then-retry.
 The terminal reads ``RpcRequest.url`` / ``headers`` / ``body`` and
 delegates to ``Kernel.post``. Middlewares and the terminal read/write the
 centralized ``RPC_CONTEXT_*`` keys from ``_middleware.context``; the
-allowed vocabulary is mirrored in ADR-009 §"Per-request behavior".
+allowed vocabulary is mirrored in ADR-0009 §"Per-request behavior".
 
 The order is pinned at two levels:
 * facade-level by ``tests/unit/test_chain_wiring.py::test_chain_seeded_with_final_adr_009_ordering``
@@ -47,13 +47,13 @@ from .tracing import TracingMiddleware
 
 
 class MiddlewareChainBuilder:
-    """Builds the seven-middleware ADR-009 chain.
+    """Builds the seven-middleware ADR-0009 chain.
 
     Provider callables (``rate_limit_max_retries_provider`` etc.) are
     used by ``RetryMiddleware`` / ``AuthRefreshMiddleware`` so
     post-construction mutations on ``MiddlewareChainHost`` still take
     effect — the integration-test idiom of poking
-    ``core._chain_host._rate_limit_max_retries = 0`` must keep working.
+    ``core._composed.chain_host._rate_limit_max_retries = 0`` must keep working.
     """
 
     def __init__(
@@ -120,10 +120,9 @@ class MiddlewareChainBuilder:
             # delegates to ``AuthRefreshCoordinator.await_refresh``, so
             # the coalesced single-flight refresh contract from the
             # coordinator is preserved end-to-end.
-            # ``refresh_callback_enabled_provider`` reads the
-            # coordinator's internal callback slot to skip refresh when
-            # no callback was configured (matches the legacy
-            # ``host._refresh_callback is not None`` gate in the leaf).
+            # ``refresh_callback_enabled_provider`` reads the coordinator's
+            # ``has_refresh_callback`` property to skip refresh when no
+            # callback was configured.
             # ``refresh_retry_delay_provider`` is callable for
             # live-binding parity with retry budgets.
             # ``is_auth_error`` is supplied as a live-binding callable from

@@ -1,25 +1,26 @@
-"""Tests for auth cookie/token extraction and AuthTokens dataclass (split from tests/unit/test_auth.py for D1 PR-2).
+"""Tests for auth cookie/token extraction and AuthTokens dataclass (split in D1 PR-2).
 
 This file owns one concern from the auth subpackage. The original
-``tests/unit/test_auth.py`` (4090 LOC) was split into six concern-aligned
-files alongside the deletion of ``_AuthFacadeModule``; see ADR-003
-(superseded) and ADR-007 (test-monkeypatch policy) for the rationale.
+monolithic auth test module was split into six concern-aligned files
+alongside the deletion of ``_AuthFacadeModule``; see ADR-0003
+(superseded) and ADR-0007 (test-monkeypatch policy) for the rationale.
 """
 
 import json
 
 import pytest
 
-from notebooklm._auth.extraction import _safe_url
+from notebooklm._auth.cookies import load_httpx_cookies
+from notebooklm._auth.extraction import (
+    _safe_url,
+    extract_csrf_from_html,
+    extract_session_id_from_html,
+)
+from notebooklm._auth.storage import save_cookies_to_storage, snapshot_cookie_jar
 from notebooklm.auth import (
     AuthTokens,
     build_httpx_cookies_from_storage,
     extract_cookies_from_storage,
-    extract_csrf_from_html,
-    extract_session_id_from_html,
-    load_httpx_cookies,
-    save_cookies_to_storage,
-    snapshot_cookie_jar,
 )
 
 
@@ -425,8 +426,8 @@ class TestCookieAttributePreservation:
         """Load → save (no mutation) → reload preserves attrs.
 
         This is the silent-erosion path users hit on idle calls: nothing
-        changes, but the save side appends fresh entries from the in-memory
-        jar (auth.py:1095). Without the load-side fix, those appended entries
+        changes, but the save side appends fresh entries from the in-memory jar
+        (``notebooklm._auth.storage.save_cookies_to_storage``). Without the load-side fix, those appended entries
         would carry default ``path=/``, ``secure=False``, ``httpOnly=False``.
         """
         storage_file = tmp_path / "storage_state.json"
@@ -717,3 +718,71 @@ class TestExtractSessionIdRedirect:
 
         with pytest.raises(ValueError, match="Authentication expired"):
             extract_session_id_from_html(html)
+
+
+class TestUnavailableRedirectClassification:
+    """A redirect to notebooklm.google is the region/anti-abuse gate, not a drift (#1630)."""
+
+    _MARKETING_HTML = "<html><body>NotebookLM marketing splash — no WIZ_global_data.</body></html>"
+
+    def test_csrf_classifies_location_unsupported_redirect(self):
+        with pytest.raises(ValueError) as exc:
+            extract_csrf_from_html(
+                self._MARKETING_HTML, "https://notebooklm.google/?location=unsupported"
+            )
+        msg = str(exc.value)
+        assert "region / anti-abuse access gate" in msg
+        assert "location=unsupported" in msg  # the diagnostic is surfaced, not swallowed
+        assert "page structure" not in msg  # NOT the misleading file-a-bug message
+
+    def test_session_id_classifies_redirect(self):
+        with pytest.raises(ValueError) as exc:
+            extract_session_id_from_html(self._MARKETING_HTML, "https://notebooklm.google")
+        msg = str(exc.value)
+        assert "region / anti-abuse access gate" in msg
+        assert "page structure" not in msg
+
+    def test_app_host_drift_still_says_page_structure(self):
+        # A token-less response from the real APP host (not the gate) keeps the
+        # original "page structure" message — the gate branch must not capture it.
+        with pytest.raises(ValueError, match="page structure"):
+            extract_csrf_from_html(self._MARKETING_HTML, "https://notebooklm.google.com/")
+
+    # The real notebooklm.google gate page carries an accounts.google.com sign-in
+    # link; the authoritative final-URL gate check must win over the body scan,
+    # otherwise it mis-routes to "Authentication expired" (the codex finding).
+    _GATE_HTML_WITH_SIGNIN = (
+        '<html><body>NotebookLM <a href="https://accounts.google.com/ServiceLogin">'
+        "Sign in</a></body></html>"
+    )
+
+    def test_csrf_gate_wins_over_accounts_link_in_body(self):
+        with pytest.raises(ValueError) as exc:
+            extract_csrf_from_html(
+                self._GATE_HTML_WITH_SIGNIN, "https://notebooklm.google/?location=unsupported"
+            )
+        msg = str(exc.value)
+        assert "region / anti-abuse access gate" in msg
+        assert "Authentication expired" not in msg
+
+    def test_session_id_gate_wins_over_accounts_link_in_body(self):
+        with pytest.raises(ValueError) as exc:
+            extract_session_id_from_html(
+                self._GATE_HTML_WITH_SIGNIN, "https://notebooklm.google/?location=unsupported"
+            )
+        msg = str(exc.value)
+        assert "region / anti-abuse access gate" in msg
+        assert "Authentication expired" not in msg
+
+    def test_gate_message_does_not_trigger_auto_refresh(self):
+        # An environmental gate must NOT match the auth-error signals that drive
+        # NOTEBOOKLM_REFRESH_CMD — re-auth can't fix it, so refreshing is futile.
+        # Pin it so a careless reword of the message can't silently re-enable it.
+        from notebooklm._auth.refresh import _AUTH_ERROR_SIGNALS
+
+        with pytest.raises(ValueError) as exc:
+            extract_csrf_from_html(
+                self._GATE_HTML_WITH_SIGNIN, "https://notebooklm.google/?location=unsupported"
+            )
+        lowered = str(exc.value).lower()
+        assert not any(signal in lowered for signal in _AUTH_ERROR_SIGNALS)

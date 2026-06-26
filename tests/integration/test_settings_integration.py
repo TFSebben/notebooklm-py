@@ -143,7 +143,7 @@ class TestSettingsAPI:
     async def test_get_output_language_raises_on_envelope_drift(
         self, httpx_mock: HTTPXMock, auth_tokens, build_rpc_response
     ):
-        """Genuine drift in the mandatory settings envelope raises (ADR-011).
+        """Genuine drift in the mandatory settings envelope raises (ADR-0011).
 
         ``[[None, None]]`` has no flags block at ``result[0][2]`` — the
         structurally-mandatory envelope moved, so this is real schema drift and
@@ -222,8 +222,9 @@ class TestLoginLanguageSync:
         # stand-in context manager wrapping a real ``NotebookLMClient``.
         real_client = NotebookLMClient(auth_tokens)
         with (
-            patch(
-                "notebooklm.cli.session_cmd.NotebookLMClient.from_storage",
+            patch.object(
+                NotebookLMClient,
+                "from_storage",
                 new_callable=MagicMock,
                 return_value=_from_storage_cm(real_client),
             ),

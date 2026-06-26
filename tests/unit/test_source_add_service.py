@@ -11,10 +11,17 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from notebooklm._app import source_add as cli_source_add
 from notebooklm._source.add import SourceAddService
 from notebooklm._sources import SourcesAPI
-from notebooklm.cli.services import source_add as cli_source_add
-from notebooklm.exceptions import NetworkError, NonIdempotentRetryError, SourceAddError
+from notebooklm.exceptions import (
+    AuthError,
+    NetworkError,
+    NonIdempotentRetryError,
+    RateLimitError,
+    ServerError,
+    SourceAddError,
+)
 from notebooklm.rpc import RPCError, RPCMethod
 from notebooklm.types import Source
 
@@ -159,12 +166,11 @@ async def test_add_text_uses_exact_rpc_shape_and_wait_hook(
     assert rpc.calls == [
         {
             "method": RPCMethod.ADD_SOURCE,
+            # Nested template block per the Gemini-3.5 wire migration (#1546).
             "params": [
-                [[None, ["Title", "content"], None, None, None, None, None, None]],
+                [[None, ["Title", "content"], None, 2, None, None, None, None, None, None, 1]],
                 "nb_1",
-                [2],
-                None,
-                None,
+                [2, None, None, [1, None, None, None, None, None, None, None, None, None, [1]]],
             ],
             "source_path": "/notebook/nb_1",
             "allow_null": False,
@@ -173,6 +179,66 @@ async def test_add_text_uses_exact_rpc_shape_and_wait_hook(
         }
     ]
     wait_until_ready.assert_awaited_once_with("nb_1", "src_text", timeout=9.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "transport_error",
+    [
+        RateLimitError("quota exceeded", retry_after=30),
+        AuthError("csrf token expired"),
+        ServerError("upstream 503"),
+        NetworkError("connection reset"),
+    ],
+    ids=["rate_limit", "auth", "server", "network"],
+)
+async def test_add_text_propagates_narrow_transport_errors_unwrapped(
+    service: SourceAddService,
+    logger: logging.Logger,
+    transport_error: Exception,
+) -> None:
+    # ADR-0019 cross-cutting rule: typed transport errors propagate UNWRAPPED
+    # so callers can catch RateLimitError (back-off via retry_after), AuthError
+    # (re-login), ServerError (transient retry) — the same catch ordering
+    # add_url and add_drive already follow. Before the fix, add_text's bare
+    # ``except RPCError`` collapsed all of these into SourceAddError.
+    with pytest.raises(type(transport_error)) as exc_info:
+        await service.add_text(
+            "nb_1",
+            "Title",
+            "content",
+            rpc=SimpleNamespace(rpc_call=AsyncMock(side_effect=transport_error)),
+            wait_until_ready=AsyncMock(),
+            logger=logger,
+        )
+
+    assert exc_info.value is transport_error
+    assert not isinstance(exc_info.value, SourceAddError)
+
+
+@pytest.mark.asyncio
+async def test_add_text_wraps_generic_rpc_error(
+    service: SourceAddService,
+    logger: logging.Logger,
+) -> None:
+    # The residual broad RPCError (e.g. validation / decode-shaped failures)
+    # still wraps into SourceAddError, with the original preserved on both the
+    # ``cause`` attribute and the ``raise ... from`` chain.
+    rpc_error = RPCError("text add failed")
+
+    with pytest.raises(SourceAddError) as exc_info:
+        await service.add_text(
+            "nb_1",
+            "Title",
+            "content",
+            rpc=SimpleNamespace(rpc_call=AsyncMock(side_effect=rpc_error)),
+            wait_until_ready=AsyncMock(),
+            logger=logger,
+        )
+
+    assert exc_info.value.cause is rpc_error
+    assert exc_info.value.__cause__ is rpc_error
+    assert "Failed to add text source 'Title'" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
@@ -342,6 +408,16 @@ async def test_raw_url_helpers_disable_internal_retries(service: SourceAddServic
 
     assert rpc.calls[0]["disable_internal_retries"] is True
     assert rpc.calls[0]["params"][0][0][2] == ["https://example.com"]
+    # URL add migrated to the nested trailing block (#1546): spec gains a
+    # trailing 1 and the flat [2],None,None tail becomes [2,None,None,[1,...,[1]]].
+    assert rpc.calls[0]["params"][0][0][-1] == 1
+    assert rpc.calls[0]["params"][2] == [
+        2,
+        None,
+        None,
+        [1, None, None, None, None, None, None, None, None, None, [1]],
+    ]
+    assert len(rpc.calls[0]["params"]) == 3
     assert rpc.calls[1]["disable_internal_retries"] is True
     assert rpc.calls[1]["allow_null"] is False
     assert rpc.calls[1]["params"][0][0][7] == ["https://youtu.be/video"]
@@ -368,7 +444,7 @@ async def test_sources_api_add_url_uses_late_bound_facade_hooks() -> None:
 # ---------------------------------------------------------------------------
 # CLI service layer: SSRF guard on `source add --url`
 #
-# These tests target ``notebooklm.cli.services.source_add.validate_url`` and
+# These tests target ``notebooklm._app.source_add.validate_url`` and
 # the routing inside ``build_source_add_plan``. They replace the previous
 # ``startswith(("http://", "https://"))`` prefix check, which let
 # ``file:///etc/passwd`` and ``http://169.254.169.254/`` through.

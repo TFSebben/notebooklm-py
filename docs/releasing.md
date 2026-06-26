@@ -56,7 +56,9 @@ Proceed with release preparation?
   ```
 - [ ] Set up the development environment:
   ```bash
-  # `[all]` excludes the cookies extra (Python 3.13+ rookiepy issue) — see docs/installation.md#all-vs-all-extras
+  # Canonical contributor install; add --extra mcp/--extra server when
+  # validating those adapters locally. `[all]` also includes mcp+server
+  # and deliberately excludes cookies (Python 3.13+ rookiepy issue).
   uv sync --frozen --extra browser --extra dev --extra markdown
   uv run playwright install chromium
   ```
@@ -73,7 +75,7 @@ Proceed with release preparation?
 - [ ] Update `Last Updated` dates in modified docs
 - [ ] Verify example scripts have valid syntax:
   ```bash
-  uv run python -m py_compile docs/examples/*.py
+  uv run python -m py_compile examples/*.py
   ```
 
 **Related docs to check/update if relevant:**
@@ -145,6 +147,13 @@ documented client namespace methods under `NotebookLMClient.notebooks`,
 `sharing`. Function signatures include positional/keyword compatibility and
 default values; changing a default is a public behavior change.
 
+The allowlist is **release-scoped**: each entry records a break pending the
+*next* tag, not a permanent exemption. Once `vX.Y.Z` ships, its entries are in
+the baseline and must be pruned — see
+[Prune the API-Compat Allowlist](#prune-the-api-compat-allowlist). The Code
+Quality job runs the audit with `--check-stale`, so a stale entry (one matching
+no break against the baseline) is a CI failure, not silent cruft.
+
 ### Changelog
 
 - [ ] Get commits since last release:
@@ -182,8 +191,9 @@ default values; changing a default is a public behavior change.
   ```bash
   uv run python scripts/check_ci_install_parity.py
   uv run python scripts/check_claude_md_freshness.py
+  uv run python scripts/check_docs_module_refs.py
   # second run confirms release edits did not introduce new API drift
-  uv run python scripts/audit_public_api_compat.py
+  uv run python scripts/audit_public_api_compat.py --check-stale
   ```
 - [ ] Fix any issues before proceeding
 
@@ -273,7 +283,7 @@ default values; changing a default is a public behavior change.
 
 The **Verify Package** workflow (`.github/workflows/verify-package.yml`) exercises a published wheel in two phases so packaging bugs cannot silently fall through to a stale PyPI mirror:
 
-1. **Dep tree from `uv.lock`.** `uv sync --frozen --extra browser --extra dev --extra markdown` installs every locked dep into `.venv/` — the same canonical extras documented in `docs/installation.md`. This produces a deterministic dep tree without any TestPyPI lookups.
+1. **Dep tree from `uv.lock`.** `uv sync --frozen --extra browser --extra dev --extra markdown --extra mcp --extra server` installs the locked dependency tree for the full non-cookies extra set into `.venv/`: browser automation, developer tooling, Markdown export, MCP, and REST server dependencies. `cookies` stays excluded because of the Python 3.13+ `rookiepy` issue. This produces a deterministic dep tree without any TestPyPI lookups.
 2. **Wheel from the chosen index, `--no-deps`.** `uv pip install --python .venv/bin/python --no-deps --reinstall --no-cache --only-binary=:all: --index-url <testpypi|pypi> "notebooklm-py==<version>"` swaps the editable install left behind by `uv sync` for the actual published wheel. `--no-deps` is load-bearing: without it the previous `--extra-index-url https://pypi.org/simple/` fallback would mask a broken/missing TestPyPI upload by resolving an older version from PyPI. `--reinstall --no-cache --only-binary=:all:` guarantee we test the freshly-uploaded wheel and never a cached sdist. The explicit `--python .venv/bin/python` is required because `uv sync` does not seed `pip` into the project venv — a bare `source .venv/bin/activate && pip install …` would silently fall back to the runner's system pip and leave the editable install in place.
 
 The same chain runs for `source: pypi` (post-publish verification) — only the wheel index changes; the locked dep tree is identical.
@@ -331,6 +341,43 @@ The `Publish to PyPI` step in `publish.yml` also opts into **PEP 740 attestation
   - Title: `vX.Y.Z`
   - Copy release notes from `CHANGELOG.md`
   - Publish release
+
+### Prune the API-Compat Allowlist
+
+Pushing the tag advances the audit baseline — `audit_public_api_compat.py`
+resolves it from `git describe --tags --abbrev=0`, so the breaks you just
+shipped are now part of the `vX.Y.Z` baseline and are **no longer breaks against
+it**. The baseline advances automatically; the allowlist is the manual half that
+must reset, or it accumulates dead entries that describe nothing.
+
+The lifecycle to keep in mind:
+
+- **baseline** = the last *released* version (automatic — it's the latest tag).
+- **allowlist** = the intentional breaks pending the *next* release. It should
+  reset to (near) empty at each release boundary.
+
+Concretely, **after the tag is pushed**, prune the entries that just shipped:
+
+- [ ] In a follow-up PR (on `main`, after the tag exists), remove from
+  `scripts/api-compat-allowlist.json` every `allowed_breaks` entry that
+  described a `vPREV → vX.Y.Z` change. These are now baked into the `vX.Y.Z`
+  baseline. List the stale entries with:
+  ```bash
+  uv run python scripts/audit_public_api_compat.py --json \
+    | python -c "import json,sys; print('\n'.join(f\"{e['code']}  {e['object']}\" for e in json.load(sys.stdin)['stale_allowances']))"
+  ```
+- [ ] Re-run the gate in strict mode — it must report **no stale entries**:
+  ```bash
+  uv run python scripts/audit_public_api_compat.py --check-stale
+  ```
+
+> **Forcing function:** the Code Quality job runs the audit with `--check-stale`,
+> which **fails** on any allowlist entry that matches no break against the
+> baseline. So the moment `vX.Y.Z` is tagged, the just-shipped entries become
+> stale and CI goes red until this prune PR lands — the prune is mandatory, not
+> a checklist nicety. The pair-aware rule keeps the two path-views of a callable
+> (`notebooklm.X` and `notebooklm.client.X`) together: a unit is pruned only when
+> *neither* view still matches a break.
 
 ---
 

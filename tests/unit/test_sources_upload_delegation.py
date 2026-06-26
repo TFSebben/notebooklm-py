@@ -31,9 +31,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import notebooklm._sources as sources_module
-from _fixtures.fake_core import make_fake_core
 from notebooklm._source.upload import SourceUploadPipeline
 from notebooklm._sources import SourcesAPI
+from tests._fixtures.fake_core import make_fake_core
 
 
 def _parse_sources_module() -> ast.Module:
@@ -300,7 +300,7 @@ def test_sources_module_holds_no_scotty_implementation() -> None:
     leaked = [token for token in forbidden if token in code]
     assert not leaked, (
         "_sources.py leaked resumable-upload implementation tokens in executable "
-        f"code (should delegate to _source_upload.py): {leaked}"
+        f"code (should delegate to notebooklm._source.upload): {leaked}"
     )
 
 

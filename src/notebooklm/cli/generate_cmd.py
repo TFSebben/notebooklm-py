@@ -1,12 +1,13 @@
-"""Generate content CLI commands — thin Click handlers (ADR-008).
+"""Generate content CLI commands — thin Click handlers (ADR-0008).
 
-All validation, enum mapping, retry/wait orchestration, and output
-dispatch live in ``cli/services/generate.py``. Tests patch
-``NotebookLMClient`` / ``console`` / ``json_error_response`` /
-``json_output_response`` / ``get_language`` / ``_output_mind_map_result``
-as module-level attributes here, so those names remain imported at
-module scope and ``_output_mind_map_result`` + ``resolve_language``
-remain defined inline rather than re-exported.
+Plan validation, enum mapping, retry/wait orchestration, and per-kind
+generation execution live in the transport-neutral ``_app.generate`` core plus
+the CLI adapter in ``cli/services/generate.py``. Command-layer rendering and
+exit policy stay in this module. Tests patch ``console`` /
+``json_error_response`` / ``json_output_response`` / ``get_language`` /
+``_output_mind_map_result`` as module-level attributes here, so those names
+remain imported at module scope and ``_output_mind_map_result`` +
+``resolve_language`` remain defined inline rather than re-exported.
 """
 
 import os
@@ -15,9 +16,11 @@ from typing import Any
 import click
 from click.core import ParameterSource
 
-from ..client import NotebookLMClient
+from .._app.generate_retry import (
+    GenerationOutcome,
+)
 from ..types import MindMap, MindMapResult
-from .auth_runtime import with_client
+from .auth_runtime import resolve_client_factory, with_client
 from .error_handler import current_json_output, output_error
 from .input import resolve_prompt
 from .language_cmd import SUPPORTED_LANGUAGES, get_language
@@ -40,9 +43,6 @@ from .rendering import (
     json_output_response,
 )
 from .resolve import require_notebook
-from .services.artifact_generation import (
-    GenerationOutcome,
-)
 from .services.generate import (
     _INFOGRAPHIC_STYLE_MAP,
     GenerationExecutionResult,
@@ -61,7 +61,7 @@ def resolve_language(language: str | None) -> str:
     > "en" default. Uses explicit None checks to avoid treating empty
     string as falsy. Validates each candidate against the supported list.
 
-    Invalid codes route through :func:`output_error` per ADR-015: under
+    Invalid codes route through :func:`output_error` per ADR-0015: under
     ``--json`` the typed JSON envelope is emitted on stdout
     (``code: "VALIDATION_ERROR"``, exit 1); in text mode the same message
     is written to stderr (exit 1, no Click usage footer). The active
@@ -254,7 +254,7 @@ def _run_generate(*, kind: str, **handler_locals: Any) -> Any:
             click.echo(line, err=True)
 
     async def _run() -> Any:
-        async with NotebookLMClient(client_auth) as client:
+        async with resolve_client_factory(ctx)(client_auth) as client:
             result = await execute_generation(
                 plan,
                 client,
@@ -790,18 +790,20 @@ def generate_data_table(
 @multi_source_option
 @language_option
 @click.option(
-    "--instructions", default=None, help="Custom instructions for the mind map (note-backed only)"
+    "--instructions",
+    default=None,
+    help="Custom prompt to steer the mind map. Applied reliably for the "
+    "interactive kind; sent for note-backed too, but the server may ignore it.",
 )
 @click.option(
     "--kind",
     "map_kind",
     type=click.Choice(["interactive", "note-backed"]),
-    default="note-backed",
+    default="interactive",
     show_default=True,
     help=(
         "Which mind map to generate: 'interactive' (studio artifact, polled to "
-        "completion) or 'note-backed' (JSON tree, synchronous). The default "
-        "becomes 'interactive' in v0.8.0."
+        "completion) or 'note-backed' (JSON tree, synchronous)."
     ),
 )
 @json_option
@@ -813,14 +815,12 @@ def generate_mind_map(
 
     \b
     Two kinds (issue #1256):
-      --kind note-backed   JSON tree, synchronous (default)
-      --kind interactive   interactive studio artifact, polled to completion
+      --kind interactive   interactive studio artifact, polled to completion (default)
+      --kind note-backed   JSON tree, synchronous
     Both export the same JSON node tree via 'download mind-map'.
-
-    \b
-    Heads up: the default --kind will switch to 'interactive' in v0.8.0
-    (NotebookLM's web app already creates interactive maps). Pass --kind
-    explicitly to pin your choice. --instructions applies to note-backed only.
+    --instructions is a free-text prompt that steers generation; the
+    interactive kind applies it reliably (the note-backed kind passes it
+    through, but the server may not always honor it).
 
     \b
     Use --json for machine-readable output.

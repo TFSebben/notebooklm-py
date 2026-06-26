@@ -3,7 +3,7 @@
 Splits the client-runtime constructor into three concerns:
 :func:`validate_constructor_args` (kwarg validation + normalization),
 :func:`build_collaborators` (the seven collaborators in dependency order),
-and :func:`wire_middleware_chain` (the seven-middleware ADR-009 chain).
+and :func:`wire_middleware_chain` (the seven-middleware ADR-0009 chain).
 Dependency-ordering and seam-resolution comments live inside the helpers so
 future readers see *why* the order matters.
 
@@ -319,8 +319,8 @@ def build_collaborators(
     #
     # Event-loop affinity guard rationale: the lifecycle captures
     # ``asyncio.get_running_loop()`` in ``_bound_loop`` at ``open()`` time
-    # and the cross-loop check in ``_perform_authed_post`` does a cheap
-    # ``is`` comparison against it. Each client is per-loop — the asyncio primitives we hold
+    # and ``RuntimeTransport.perform_authed_post`` does the cross-loop
+    # check with a cheap ``is`` comparison against it. Each client is per-loop — the asyncio primitives we hold
     # (``_reqid_lock``, ``_refresh_lock``, ``_auth_snapshot_lock``,
     # ``_rpc_semaphore``, the ``httpx.AsyncClient``
     # pool, in-flight tasks like ``_refresh_task`` / ``_keepalive_task``)
@@ -446,7 +446,7 @@ def wire_middleware_chain(
     callable so rebinding ``ClientSeams.is_auth_error`` after construction
     still steers the chain.
     """
-    # ADR-009 chain construction. PR history, leaf exception shape,
+    # ADR-0009 chain construction. PR history, leaf exception shape,
     # and ``RpcRequest.context`` contract live in
     # ``_middleware/chain.py`` module docstring.
     chain_builder = MiddlewareChainBuilder(

@@ -1,4 +1,4 @@
-"""Static AST checks enforcing the ADR-008 ``cli/services`` layering boundary.
+"""Static AST checks enforcing the ADR-0008 ``cli/services`` layering boundary.
 
 This file scans cleaned ``cli/services`` modules for forbidden imports —
 top-level ``click`` and relative imports that *resolve* to the command-layer
@@ -111,10 +111,10 @@ FORBIDDEN_ABSOLUTE_TARGETS = frozenset(
 GUARDED_PATHS = {
     "cli/services/auth_diagnostics.py": SERVICES_ROOT / "auth_diagnostics.py",
     "cli/services/auth_source.py": SERVICES_ROOT / "auth_source.py",
-    "cli/services/artifact_generation.py": SERVICES_ROOT / "artifact_generation.py",
     "cli/services/confirming_mutation.py": SERVICES_ROOT / "confirming_mutation.py",
     "cli/services/download.py": SERVICES_ROOT / "download.py",
     "cli/services/generate.py": SERVICES_ROOT / "generate.py",
+    "cli/services/label_listing.py": SERVICES_ROOT / "label_listing.py",
     "cli/services/listing.py": SERVICES_ROOT / "listing.py",
     "cli/services/login/browser_accounts.py": SERVICES_ROOT / "login" / "browser_accounts.py",
     "cli/services/login/chromium_accounts.py": SERVICES_ROOT / "login" / "chromium_accounts.py",
@@ -129,18 +129,14 @@ GUARDED_PATHS = {
     "cli/services/login/refresh.py": SERVICES_ROOT / "login" / "refresh.py",
     "cli/services/login/rookiepy_errors.py": SERVICES_ROOT / "login" / "rookiepy_errors.py",
     "cli/services/playwright_login.py": SERVICES_ROOT / "playwright_login.py",
+    "cli/services/playwright_redaction.py": SERVICES_ROOT / "playwright_redaction.py",
     "cli/services/polling.py": SERVICES_ROOT / "polling.py",
     "cli/services/research.py": SERVICES_ROOT / "research.py",
     "cli/services/session_context.py": SERVICES_ROOT / "session_context.py",
-    "cli/services/skill_install.py": SERVICES_ROOT / "skill_install.py",
-    "cli/services/source_clean.py": SERVICES_ROOT / "source_clean.py",
-    "cli/services/source_add.py": SERVICES_ROOT / "source_add.py",
-    "cli/services/source_content.py": SERVICES_ROOT / "source_content.py",
     "cli/services/source_listing.py": SERVICES_ROOT / "source_listing.py",
     "cli/services/source_mutations.py": SERVICES_ROOT / "source_mutations.py",
     "cli/services/source_research.py": SERVICES_ROOT / "source_research.py",
     "cli/services/source_serializers.py": SERVICES_ROOT / "source_serializers.py",
-    "cli/services/source_wait.py": SERVICES_ROOT / "source_wait.py",
 }
 
 # Stage 3 migration inventory. These modules currently own presentation
@@ -195,7 +191,7 @@ def _runtime_imports(path: pathlib.Path) -> Iterator[tuple[str, int]]:
 
     Imports inside ``if TYPE_CHECKING:`` blocks are skipped — those have no
     runtime dependency on the cited module and are explicitly allowed by
-    ADR-008 (they keep forward-reference type hints possible without
+    ADR-0008 (they keep forward-reference type hints possible without
     importing the presentation layer at runtime).
     """
     tree = ast.parse(path.read_text())
@@ -460,7 +456,7 @@ def test_services_boundary_no_forbidden_imports(logical_name, path):
     """Each guarded service module must be free of presentation/runtime imports."""
     assert path.exists(), f"Expected guarded service module at {path}"
     violations = _boundary_violations(path)
-    assert not violations, f"{logical_name} violates ADR-008 boundary:\n  " + "\n  ".join(
+    assert not violations, f"{logical_name} violates ADR-0008 boundary:\n  " + "\n  ".join(
         violations
     )
 
@@ -485,7 +481,7 @@ def test_transitional_services_boundary_violations_are_documented(logical_name, 
     assert path.exists(), f"Expected guarded service module at {path}"
     violations = _boundary_violations(path)
     assert violations == expected_violations, (
-        f"{logical_name} ADR-008 boundary inventory changed.\n"
+        f"{logical_name} ADR-0008 boundary inventory changed.\n"
         "If this removes a violation, update the expected list in the same PR.\n"
         "If this adds a violation, move rendering/exit policy back to the command layer.\n"
         "Current violations:\n  " + "\n  ".join(violations)

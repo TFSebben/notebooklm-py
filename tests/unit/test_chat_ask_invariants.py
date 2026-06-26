@@ -30,13 +30,13 @@ from urllib.parse import parse_qs, unquote, urlparse
 import httpx
 import pytest
 
-from _helpers.client_factory import build_client_shell_for_tests
-from conftest import install_post_as_stream
 from notebooklm import NotebookLMClient
 from notebooklm._chat import ChatAPI
 from notebooklm._request_types import AuthSnapshot
 from notebooklm.auth import AuthTokens
 from notebooklm.exceptions import ChatError
+from tests._helpers.client_factory import build_client_shell_for_tests
+from tests.unit.conftest import install_post_as_stream
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -63,6 +63,65 @@ def _extract_query_param(url: str, key: str) -> str | None:
     qs = parse_qs(urlparse(url).query, keep_blank_values=True)
     values = qs.get(key)
     return values[0] if values else None
+
+
+# ---------------------------------------------------------------------------
+# chat timeout routing
+# ---------------------------------------------------------------------------
+
+
+class TestChatTimeoutRouting:
+    def test_client_uses_chat_specific_timeout_by_default(self):
+        auth = AuthTokens(cookies={"SID": "x"}, csrf_token="csrf", session_id="sid")
+        client = NotebookLMClient(auth, timeout=75.0)
+
+        assert client.chat._chat_timeout == 180.0
+
+    def test_client_chat_timeout_none_inherits_transport_timeout(self):
+        auth = AuthTokens(cookies={"SID": "x"}, csrf_token="csrf", session_id="sid")
+        client = NotebookLMClient(auth, timeout=75.0, chat_timeout=None)
+
+        assert client.chat._chat_timeout is None
+
+    def test_client_chat_timeout_override_wins(self):
+        auth = AuthTokens(cookies={"SID": "x"}, csrf_token="csrf", session_id="sid")
+        client = NotebookLMClient(auth, timeout=75.0, chat_timeout=180.0)
+
+        assert client.chat._chat_timeout == 180.0
+
+    @pytest.mark.asyncio
+    async def test_ask_passes_chat_read_timeout_and_disables_timeout_retry(self):
+        """``ask`` uses the chat-specific read window without retrying timed-out streams."""
+        transport = SimpleNamespace(
+            perform_authed_post=AsyncMock(
+                return_value=httpx.Response(
+                    200,
+                    request=httpx.Request("POST", "https://example.test/chat"),
+                    content=_make_answer_response_body(),
+                )
+            )
+        )
+        chat = ChatAPI(
+            rpc=SimpleNamespace(),
+            transport=transport,
+            reqid=SimpleNamespace(next_reqid=AsyncMock(return_value=100000)),
+            loop_guard=SimpleNamespace(assert_bound_loop=lambda: None),
+            chat_timeout=45.0,
+        )
+
+        result = await chat.ask(
+            "nb-1",
+            "Q?",
+            source_ids=["s1"],
+            conversation_id="conv-1",
+        )
+
+        assert result.answer == "Refactor answer is long enough."
+        assert transport.perform_authed_post.await_args.kwargs.get("read_timeout") == 45.0
+        assert (
+            transport.perform_authed_post.await_args.kwargs.get("disable_read_timeout_retries")
+            is True
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -323,7 +382,7 @@ class TestChatRefreshRetry:
                 monkeypatch, core._collaborators.kernel.get_http_client(), fake_post
             )
 
-            # Wave 8 of session-decoupling (ADR-014 Rule 2 Corollary):
+            # Wave 8 of session-decoupling (ADR-0014 Rule 2 Corollary):
             # ``ChatAPI`` takes its four direct collaborators by keyword
             # arg. Wired here from the real ``Session`` under test so the
             # refresh path exercises the production transport/rpc/reqid
@@ -521,7 +580,7 @@ class TestBuildChatRequestFactory:
     """
 
     def _factory(self) -> ChatAPI:
-        # Wave 8 of session-decoupling (ADR-014 Rule 2 Corollary):
+        # Wave 8 of session-decoupling (ADR-0014 Rule 2 Corollary):
         # ``ChatAPI`` takes direct collaborators by keyword arg. Pure
         # ``_build_chat_request`` exercise — none of these collaborators
         # are touched, so they are bare ``MagicMock()`` placeholders.

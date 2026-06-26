@@ -1,6 +1,6 @@
 """MetricsMiddleware — per-RPC telemetry emitter for the middleware chain.
 
-Per ADR-009 §"Chain ordering", ``MetricsMiddleware`` sits
+Per ADR-0009 §"Chain ordering", ``MetricsMiddleware`` sits
 just inside ``DrainMiddleware`` (and just outside ``SemaphoreMiddleware``) in
 the chain ordering
 ``[Drain, Metrics, Semaphore, Retry, AuthRefresh, ErrorInjection, Tracing]``,
@@ -21,7 +21,7 @@ per logical RPC:
 The emit fires only when ``RPC_CONTEXT_RPC_METHOD`` is present in
 ``request.context``.
 Other code paths through the chain (e.g. the chat streaming path in
-``_chat.transport.send_authed_post``, which calls
+``_chat.transport.chat_aware_authed_post``, which calls
 ``RuntimeTransport.perform_authed_post`` directly without minting an
 ``RpcExecutor`` telemetry frame) leave the key absent and skip emission —
 so chat-side requests do not appear in the RPC counters or telemetry

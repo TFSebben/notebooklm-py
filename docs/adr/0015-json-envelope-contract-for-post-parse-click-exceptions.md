@@ -1,4 +1,4 @@
-# ADR-015: Typed JSON error envelope covers post-parse `ClickException` failures
+# ADR-0015: Typed JSON error envelope covers post-parse `ClickException` failures
 
 ## Status
 
@@ -67,8 +67,8 @@ tests as authoritative wherever they diverge.
 
 ## Context
 
-The CLI ships a stable error contract for automation: under `--json` (or
-`--json-output`), every fatal command path emits a *typed JSON error envelope*
+The CLI ships a stable error contract for automation: under `--json`, every
+fatal command path emits a *typed JSON error envelope*
 on stdout — a flat object of the shape
 
 ```json
@@ -152,7 +152,7 @@ reframed the finding in three ways that matter here:
 
 ## Decision
 
-Under `--json` (or `--json-output`), **every post-parse
+Under `--json`, **every post-parse
 `click.ClickException`-subclass failure raised from a command body or from
 the service layer it calls emits the typed JSON error envelope** defined in
 [`docs/cli-exit-codes.md`](../cli-exit-codes.md), exits with the
@@ -196,9 +196,9 @@ Concretely:
    refactored under rule 2, the message comes from `output_error(...)`
    rather than Click's `Usage: ... / Error: ...` formatter, so it omits
    the command-usage footer; this is the smallest user-visible delta
-   consistent with rule 2. Allowlisted sites (rule 5) keep Click's
+   consistent with rule 2. Marked sites (rule 5) keep Click's
    formatter unchanged.
-5. **Allowlist for residual `ClickException` raises.** A small number of
+5. **Marked residual `ClickException` raises.** A small number of
    sites are correctly raising `ClickException` subclasses today and
    should keep doing so — they sit on input-validation boundaries before
    the command produces any output, and matching Click's own
@@ -206,12 +206,13 @@ Concretely:
    validation in `cli/input.py`, profile-name argument validation in
    `cli/profile_cmd.py`, entity-ID argument validation in `cli/resolve.py`,
    shared profile-name validation in `cli/services/login/profile_targets.py`).
-   These are tracked exhaustively by
-   `ALLOWED_CLICK_EXCEPTION_SITES` in
-   [`src/notebooklm/cli/error_handler.py`](../../src/notebooklm/cli/error_handler.py)
-   and pinned by `tests/_lint/test_error_handler_allowlist.py`. New sites
-   require an allowlist entry with a justification; the default for any
-   *other* post-parse validation failure is rule 2.
+   These are tracked exhaustively by inline marker comments:
+   `# cli-input-validation: <reason>` for envelope-bypassing Click exceptions
+   and `# cli-raw-exit: <reason>` for raw `SystemExit` sites outside
+   `error_handler.py`. `tests/_guardrails/test_error_handler_allowlist.py`
+   enforces that markers are present, non-empty, and not stale. New sites
+   require a local marker with a justification; the default for any *other*
+   post-parse validation failure is rule 2.
 
 ## Consequences
 
@@ -227,10 +228,10 @@ Concretely:
 - Command and service code converges on one error-emission path
   (`output_error(...)` / library exceptions through `handle_errors(...)`),
   which composes cleanly with the `cli/services/` extraction pattern in
-  [ADR-008](./0008-cli-services-extraction-pattern.md). Service modules no
+  [ADR-0008](./0008-cli-services-extraction-pattern.md). Service modules no
   longer need to choose between raising Click exceptions (skips the
   envelope) and importing `output_error` (couples to the CLI layer); the
-  ADR-008 boundary becomes the right place to enforce typed-outcome
+  ADR-0008 boundary becomes the right place to enforce typed-outcome
   returns. Service-layer convergence work referenced under meta-audit C3
   lands as separate per-site PRs that cite this ADR.
 - Tests can assert the envelope shape with the existing JSON-purity sweeps
@@ -286,7 +287,7 @@ Concretely:
 - **Plumb `json_output` into every service helper and have each call
   `output_error(..., json_output=...)` directly from the helper.**
   Rejected as the *primary* contract shape (it would couple service
-  modules to the CLI error layer, contradicting ADR-008's boundary), but
+  modules to the CLI error layer, contradicting ADR-0008's boundary), but
   accepted as the smallest viable patch for any single site under
   remediation pressure. The preferred long-term shape is "service returns
   a typed outcome; command routes outcome through `output_error`"; the

@@ -58,6 +58,7 @@ from collections.abc import Awaitable, Callable, Coroutine
 from typing import TYPE_CHECKING, Any, cast
 
 from .._loop_affinity import assert_bound_loop
+from .._loop_bound import LoopBoundPrimitive
 from .._request_types import AuthSnapshot
 from ..auth import AuthTokens
 from .config import CORE_LOGGER_NAME
@@ -72,7 +73,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(CORE_LOGGER_NAME)
 
 
-class AuthRefreshCoordinator:
+class AuthRefreshCoordinator(LoopBoundPrimitive):
     """Owns refresh single-flight, snapshot serialization, and auth-header sync.
 
     Field names (``_refresh_lock``, ``_refresh_task``, ``_refresh_callback``,
@@ -100,21 +101,13 @@ class AuthRefreshCoordinator:
         self._metrics: ClientMetrics | None = metrics
         # Distinct from ``_refresh_lock`` — see module docstring.
         self._auth_snapshot_lock: asyncio.Lock | None = None
-        # Loop-affinity guard. Set by :meth:`ClientLifecycle.open`
-        # so :meth:`await_refresh` can short-circuit cross-loop misuse
-        # before touching the lazily-built ``_refresh_lock`` (bound to
-        # the loop the lock was first acquired under). ``None`` is a
-        # silent no-op for standalone fixtures.
-        self._bound_loop: asyncio.AbstractEventLoop | None = None
-
-    def set_bound_loop(self, loop: asyncio.AbstractEventLoop | None) -> None:
-        """Capture or clear the event-loop binding for the affinity guard.
-
-        :meth:`ClientLifecycle.open` propagates the captured loop here.
-        Passing ``None`` clears the binding for the next ``open()``
-        (which will rebind to a fresh loop).
-        """
-        self._bound_loop = loop
+        # ``_bound_loop`` (the loop-affinity guard consulted by
+        # :meth:`await_refresh` before touching the lazy ``_refresh_lock``)
+        # and ``set_bound_loop`` are provided by the
+        # :class:`~notebooklm._loop_bound.LoopBoundPrimitive` base. This
+        # coordinator only stores the binding, so it uses the default no-op
+        # ``_on_loop_rebind`` (the lazy locks are never held across
+        # ``open()`` and are rebuilt implicitly per ``open()``).
 
     @property
     def has_refresh_callback(self) -> bool:
@@ -185,12 +178,16 @@ class AuthRefreshCoordinator:
         ``await`` — so the lock is uncontested in steady state and refresh's
         tiny write block cannot block RPC throughput.
 
-        The whole-request atomicity for ``(csrf, sid, cookies)`` on the wire
-        still depends on the no-await invariant between this method returning
-        and ``client.post(...)`` inside ``_perform_authed_post`` (see the AST
-        guard in ``tests/unit/test_concurrency_refresh_race.py``). The lock
-        guarantees the four scalars in the snapshot are coherent with each
-        other; the no-await rule keeps the cookie axis aligned with them.
+        The whole-attempt atomicity for ``(csrf, sid, cookies)`` on the wire
+        is completed at the transport terminal:
+        :meth:`RuntimeTransport.refresh_request_for_current_auth` captures a
+        fresh snapshot, rebuilds the envelope, and
+        :meth:`RuntimeTransport.terminal` calls ``Kernel.post`` with no await
+        between materialization and the POST (see the AST guards in
+        ``tests/unit/test_concurrency_refresh_race.py``). This lock guarantees
+        the four scalars in the returned snapshot are coherent with each other;
+        the terminal no-await rule keeps the cookie axis aligned with the
+        materialized envelope.
 
         ``auth`` is passed explicitly per call; the lock-wait metric is
         recorded through ``self._metrics`` (supplied at construction).

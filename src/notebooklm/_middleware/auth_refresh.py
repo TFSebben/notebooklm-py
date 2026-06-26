@@ -1,6 +1,6 @@
 """AuthRefreshMiddleware — 401/403/400-CSRF retry-with-refresh for the chain.
 
-Per ADR-009 §"Chain ordering", ``AuthRefreshMiddleware`` sits just *inside*
+Per ADR-0009 §"Chain ordering", ``AuthRefreshMiddleware`` sits just *inside*
 ``RetryMiddleware`` and just *outside* ``ErrorInjectionMiddleware``. The chain
 is ``[Drain, Metrics, Semaphore, Retry, AuthRefresh, ErrorInjection, Tracing]``.
 
@@ -12,7 +12,7 @@ catches the raw auth-error ``httpx.HTTPStatusError``, triggers a coalesced
 refresh via :class:`AuthRefreshCoordinator`, rebuilds the request envelope,
 then re-invokes ``next_call`` exactly once.
 
-Why "exactly once": ADR-009 §"Retry semantics" pins
+Why "exactly once": ADR-0009 §"Retry semantics" pins
 "**exactly one** retry per ``next_call`` invocation. If the retry also
 raises 401, the exception propagates — no second retry, no recursion."
 ``RetryMiddleware`` outside this middleware does NOT retry on auth
@@ -95,18 +95,16 @@ class AuthRefreshMiddleware:
       reaches into the coordinator directly; this keeps the seam thin
       and testable.
     - ``is_auth_error``: predicate that decides whether an exception is
-      an auth failure (HTTP 400 / 401 / 403). Production wires
-      :func:`notebooklm._runtime.helpers.is_auth_error` through a lambda
-      that resolves it via the canonical module's globals at call time,
-      so ``monkeypatch.setattr("notebooklm._runtime.helpers.is_auth_error",
-      ...)`` reaches the chain live; tests that build the middleware
+      an auth failure (HTTP 400 / 401 / 403). Production wires a closure
+      over ``ClientSeams.is_auth_error`` so rebinding
+      ``client._seams.is_auth_error`` / ``seams.is_auth_error`` after
+      construction steers the chain; tests that build the middleware
       directly typically pass the function itself.
     - ``refresh_callback_enabled``: a zero-arg callable returning ``True``
-      iff a refresh callback is wired on the host. Production wires
-      ``lambda: self._auth_coord._refresh_callback is not None`` so a
+      iff a refresh callback is wired on the coordinator. Production wires
+      ``lambda: collaborators.auth_coord.has_refresh_callback`` so a
       client built without ``refresh_callback`` skips the refresh path
-      entirely (matches the legacy leaf gate on
-      ``host._refresh_callback is not None``).
+      entirely.
     - ``refresh_retry_delay``: zero-arg callable returning the
       post-refresh sleep duration. Production wires
       ``lambda: chain_host._refresh_retry_delay`` so a test that mutates
@@ -307,7 +305,7 @@ class AuthRefreshMiddleware:
           the chain with that same original ``RpcRequest``. The marker on
           the shared context suppresses a second refresh on the
           original-request retry, preserving the "exactly one refresh per
-          logical call" contract pinned in ADR-009 §"Retry semantics".
+          logical call" contract pinned in ADR-0009 §"Retry semantics".
 
         - ``RPC_CONTEXT_AUTH_SNAPSHOT`` is updated below to the freshly
           captured snapshot. Because :func:`materialize_rpc_request`

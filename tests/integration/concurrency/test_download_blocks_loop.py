@@ -55,9 +55,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from _fixtures.fake_core import FakeSession, make_fake_core
 from notebooklm._artifacts import ArtifactsAPI
 from notebooklm.types import ArtifactDownloadError
+from tests._fixtures.fake_core import FakeSession, make_fake_core
 
 # mock-based loop-blocking detection tests; no HTTP, no cassette.
 # Opt out of the tier-enforcement hook in tests/integration/conftest.py.
@@ -105,7 +105,7 @@ def mock_artifacts_api(tmp_path: Path) -> tuple[ArtifactsAPI, FakeSession]:
     boundary in pytest is fragile when both define ``mock_artifacts_api``
     at module scope.
 
-    The core is built via ``make_fake_core(...)`` (ADR-007 constructor
+    The core is built via ``make_fake_core(...)`` (ADR-0007 constructor
     injection) rather than mutating a ``MagicMock``'s ``rpc_call`` after
     construction: the fake exposes the shared ``RpcCaller`` surface on
     ``mock_core`` (and its ``rpc_executor`` mirror) plus the drain /
@@ -175,12 +175,12 @@ async def test_download_report_runs_write_off_loop_thread(
         captured.append(threading.get_ident())
         return original_write_text(self, *args, **kwargs)  # type: ignore[arg-type]
 
-    with (
-        patch.object(api._downloads, "_list_raw", new_callable=AsyncMock) as mock_list,
-        patch.object(Path, "write_text", recording_write_text),
-    ):
-        mock_list.return_value = report_artifact_list
-        result = await api.download_report("nb_t7d4", str(output_path))
+    with patch.object(Path, "write_text", recording_write_text):
+        result = await api.download_report(
+            "nb_t7d4",
+            str(output_path),
+            artifacts_data=report_artifact_list,
+        )
 
     assert result == str(output_path)
     assert output_path.exists(), "download_report should still produce the file"
@@ -332,7 +332,6 @@ async def test_concurrent_downloads_both_offload_writes(
         return original_json_dump(*args, **kwargs)  # type: ignore[arg-type]
 
     with (
-        patch.object(api._downloads, "_list_raw", new_callable=AsyncMock) as mock_list,
         patch.object(
             api._mind_maps,
             "list_mind_maps",
@@ -341,10 +340,9 @@ async def test_concurrent_downloads_both_offload_writes(
         patch.object(Path, "write_text", recording_write_text),
         patch.object(artifact_downloads.json, "dump", recording_json_dump),
     ):
-        mock_list.return_value = report_artifact_list
         report_result, mindmap_result = await asyncio.gather(
-            api.download_report("nb_t7d4", str(report_path)),
-            api.download_mind_map("nb_t7d4", str(mindmap_path)),
+            api.download_report("nb_t7d4", str(report_path), artifacts_data=report_artifact_list),
+            api.download_mind_map("nb_t7d4", str(mindmap_path), artifacts_data=[]),
         )
 
     assert report_result == str(report_path)
@@ -390,7 +388,7 @@ async def test_download_urls_batch_cookie_load_runs_off_loop_thread(
         return {}
 
     # Object-form patch against the locally-imported downloads module
-    # (ADR-007): the seam is the ``load_httpx_cookies`` name bound *in*
+    # (ADR-0007): the seam is the ``load_httpx_cookies`` name bound *in*
     # ``_artifact.downloads`` (imported there from ``..auth``), which the
     # ``asyncio.to_thread(_load_httpx_cookies, ...)`` offload resolves.
     with patch.object(
@@ -451,7 +449,7 @@ async def test_download_url_cookie_load_runs_off_loop_thread(
 
     with (
         # Object-form patch against the locally-imported downloads module
-        # (ADR-007) — patches the ``load_httpx_cookies`` name bound in
+        # (ADR-0007) — patches the ``load_httpx_cookies`` name bound in
         # ``_artifact.downloads`` that the cookie-load offload resolves.
         patch.object(
             artifact_downloads,
@@ -596,7 +594,7 @@ async def test_download_url_uses_single_writer_thread_for_all_chunks(
     with (
         patch.object(real_httpx, "AsyncClient", return_value=mock_client),
         # Object-form patches against the locally-imported downloads module
-        # (ADR-007): the cookie-load seam and the module's ``threading``
+        # (ADR-0007): the cookie-load seam and the module's ``threading``
         # reference whose ``Thread`` the writer-thread construction uses.
         patch.object(artifact_downloads, "load_httpx_cookies", return_value=MagicMock()),
         patch.object(artifact_downloads.threading, "Thread", new=_RecordingThread),
@@ -749,7 +747,7 @@ async def test_download_url_writer_failure_does_not_deadlock_producer(
     with (
         patch.object(real_httpx, "AsyncClient", return_value=mock_client),
         # Object-form patch against the locally-imported downloads module
-        # (ADR-007) — patches the cookie-load seam bound in
+        # (ADR-0007) — patches the cookie-load seam bound in
         # ``_artifact.downloads``.
         patch.object(artifact_downloads, "load_httpx_cookies", return_value=MagicMock()),
         patch.object(builtins, "open", new=_patched_open),

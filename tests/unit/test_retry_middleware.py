@@ -1,7 +1,7 @@
 """Unit tests for :class:`RetryMiddleware` (Tier-12 PR 12.7).
 
 Pins the contract documented in ``src/notebooklm/_middleware/retry.py`` and
-ADR-009 §"Chain ordering":
+ADR-0009 §"Chain ordering":
 
 - **Pass-through on success.** Single ``next_call`` invocation; result
   returned unchanged.
@@ -36,13 +36,14 @@ from typing import Any
 import httpx
 import pytest
 
-# pytest puts ``tests/`` on ``sys.path``; ``_fixtures.chain`` is the canonical
-# import path documented in ``tests/_fixtures/__init__.py``.
-from _fixtures.chain import make_request
 from notebooklm._client_metrics import ClientMetrics
 from notebooklm._middleware.core import NextCall, RpcRequest, RpcResponse, build_chain
 from notebooklm._middleware.retry import RetryMiddleware
 from notebooklm._transport_errors import TransportRateLimited, TransportServerError
+
+# The ``tests/`` package chain is complete; ``tests._fixtures.chain`` is the
+# fully-qualified import path documented in ``tests/_fixtures/__init__.py``.
+from tests._fixtures.chain import make_request
 
 
 def _recording_sleep() -> tuple[Callable[[float], Awaitable[None]], list[float]]:
@@ -100,6 +101,16 @@ def _network_error(*, log_label: str = "RPC LIST_NOTEBOOKS") -> TransportServerE
     """Build a ``TransportServerError`` wrapping an ``httpx.RequestError``."""
     request = httpx.Request("POST", "https://example.test/x")
     original = httpx.RequestError("connect failed", request=request)
+    return TransportServerError(
+        f"{log_label} network error: {original}",
+        original=original,
+    )
+
+
+def _read_timeout(*, log_label: str = "chat.ask") -> TransportServerError:
+    """Build a ``TransportServerError`` wrapping an HTTPX read timeout."""
+    request = httpx.Request("POST", "https://example.test/x")
+    original = httpx.ReadTimeout("read timed out", request=request)
     return TransportServerError(
         f"{log_label} network error: {original}",
         original=original,
@@ -423,6 +434,104 @@ async def test_retries_on_network_error_until_success() -> None:
 
     assert len(calls) == 2
     assert response.response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_disable_read_timeout_retries_skips_read_timeout_retry() -> None:
+    """Chat can opt out of restarting a slow streamed generation on read timeout."""
+    sleep, slept = _recording_sleep()
+    boom = _read_timeout()
+    terminal, calls = _scripted_terminal([boom, httpx.Response(200, content=b"late")])
+    middleware = RetryMiddleware(
+        rate_limit_max_retries=3,
+        server_error_max_retries=3,
+        sleep=sleep,
+    )
+    chain = build_chain([middleware], terminal)
+
+    with pytest.raises(TransportServerError) as excinfo:
+        await chain(
+            make_request(
+                context={
+                    "log_label": "chat.ask",
+                    "disable_read_timeout_retries": True,
+                }
+            )
+        )
+
+    assert excinfo.value is boom
+    assert len(calls) == 1
+    assert slept == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "original",
+    [
+        httpx.ReadError("peer reset", request=httpx.Request("POST", "https://example.test/x")),
+        httpx.RemoteProtocolError(
+            "server disconnected", request=httpx.Request("POST", "https://example.test/x")
+        ),
+    ],
+)
+async def test_disable_read_timeout_retries_skips_post_send_network_errors(
+    original: httpx.RequestError,
+) -> None:
+    """A connection severed after the chat request was sent is not replayed."""
+    sleep, slept = _recording_sleep()
+    boom = TransportServerError("chat.ask network error", original=original)
+    terminal, calls = _scripted_terminal([boom, httpx.Response(200, content=b"late")])
+    middleware = RetryMiddleware(
+        rate_limit_max_retries=3,
+        server_error_max_retries=3,
+        sleep=sleep,
+    )
+    chain = build_chain([middleware], terminal)
+
+    with pytest.raises(TransportServerError) as excinfo:
+        await chain(
+            make_request(
+                context={
+                    "log_label": "chat.ask",
+                    "disable_read_timeout_retries": True,
+                }
+            )
+        )
+
+    assert excinfo.value is boom
+    assert len(calls) == 1
+    assert slept == []
+
+
+@pytest.mark.asyncio
+async def test_disable_read_timeout_retries_still_retries_connect_errors() -> None:
+    """Connect-time failures (request not sent) stay retryable even with the gate on."""
+    sleep, slept = _recording_sleep()
+    request = httpx.Request("POST", "https://example.test/x")
+    connect = TransportServerError(
+        "chat.ask network error",
+        original=httpx.ConnectError("connection refused", request=request),
+    )
+    terminal, calls = _scripted_terminal([connect, httpx.Response(200, content=b"ok")])
+    middleware = RetryMiddleware(
+        rate_limit_max_retries=3,
+        server_error_max_retries=3,
+        sleep=sleep,
+    )
+    chain = build_chain([middleware], terminal)
+
+    result = await chain(
+        make_request(
+            context={
+                "log_label": "chat.ask",
+                "disable_read_timeout_retries": True,
+            }
+        )
+    )
+
+    assert result.response.status_code == 200
+    assert len(calls) == 2
+    assert slept != []
 
 
 @pytest.mark.asyncio

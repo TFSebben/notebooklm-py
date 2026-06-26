@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import reprlib
 import warnings
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -9,6 +11,7 @@ from enum import Enum
 from typing import Any
 
 from .._row_adapters.artifacts import ArtifactRow
+from .._row_adapters.notes import NoteRow
 from ..rpc.types import (
     FLASHCARDS_VARIANT,
     INTERACTIVE_MIND_MAP_VARIANT,
@@ -17,14 +20,17 @@ from ..rpc.types import (
     ArtifactTypeCode,
     artifact_status_to_str,
 )
-from .common import UnknownTypeWarning, _datetime_from_timestamp
+from .common import UnknownTypeWarning
+
+logger = logging.getLogger(__name__)
 
 
 class ArtifactType(str, Enum):
     """User-facing artifact types.
 
     This is a str enum that hides internal variant complexity. For example,
-    quizzes and flashcards are both type 4 internally but distinguished by variant.
+    quizzes, flashcards, and interactive mind maps are all type 4 internally,
+    distinguished by variant.
 
     Comparisons work with both enum members and strings:
         artifact.kind == ArtifactType.AUDIO  # True
@@ -61,13 +67,15 @@ def _map_artifact_kind(artifact_type: int, variant: int | None) -> ArtifactType:
     """Convert internal artifact type and variant to user-facing ArtifactType.
 
     Args:
-        artifact_type: ArtifactTypeCode integer value from API.
-        variant: Optional variant code (e.g., for quiz vs flashcards).
+        artifact_type: Raw ArtifactTypeCode integer from LIST_ARTIFACTS, or the
+            library's synthetic note-backed mind-map code.
+        variant: Optional variant code (e.g., for quiz vs flashcards vs
+            interactive mind map).
 
     Returns:
         ArtifactType enum member. Returns UNKNOWN for unrecognized types.
     """
-    # Handle QUIZ/FLASHCARDS distinction.
+    # Resolve the type-4 family (QUIZ / FLASHCARDS / interactive mind map) by variant.
     if artifact_type == ArtifactTypeCode.QUIZ.value:
         if variant == FLASHCARDS_VARIANT:
             return ArtifactType.FLASHCARDS
@@ -82,7 +90,7 @@ def _map_artifact_kind(artifact_type: int, variant: int | None) -> ArtifactType:
             if key not in _warned_artifact_types:
                 _warned_artifact_types.add(key)
                 warnings.warn(
-                    f"Unknown QUIZ variant {variant}. "
+                    f"Unknown type-4 (quiz / flashcards / mind-map) variant {variant}. "
                     "Consider updating notebooklm-py to the latest version.",
                     UnknownTypeWarning,
                     stacklevel=3,
@@ -227,38 +235,45 @@ class Artifact:
 
         Deleted/cleared mind map: ["id", None, 2]
 
+        Mind-map rows ARE note-system rows (they come from
+        ``GET_NOTES_AND_MIND_MAPS``), so the id slot, the title, and the
+        deleted-tombstone predicate are read through
+        :class:`notebooklm._row_adapters.notes.NoteRow` — position knowledge
+        lives in the adapter, not here. A ``None`` content slot *without* the
+        recognised ``[id, None, 2]`` tombstone is sentinel drift (a deleted
+        mind map would otherwise silently leak as live): it logs a WARNING and
+        conservatively keeps the historical treat-as-live fallthrough.
+
         Returns:
-            Artifact object, or None if deleted (status=2).
+            Artifact object, or None for the note-system delete tombstone
+            ``[id, None, 2]``.
         """
         if not isinstance(data, list) or len(data) < 1:
             return None
 
-        mind_map_id = data[0] if len(data) > 0 else ""
+        row = NoteRow(data)
 
-        # Check for deleted status (item[1] is None with status=2)
-        if len(data) >= 3 and data[1] is None and data[2] == 2:
-            return None  # Deleted, don't include
+        # Deleted tombstone ([id, None, 2]): excluded from listings.
+        if row.is_deleted:
+            return None
+        if row.has_unrecognized_tombstone:
+            logger.warning(
+                "Mind-map row %s has a null content slot without the "
+                "soft-delete sentinel (tombstone drift? a deleted mind map "
+                "may be leaking as live): %s",
+                row.id,
+                reprlib.repr(data),
+            )
 
-        # Extract title and timestamp from nested structure
-        title = ""
-        created_at = None
-
-        if len(data) > 1 and isinstance(data[1], list):
-            inner = data[1]
-            # Title is at position [4]
-            if len(inner) > 4 and isinstance(inner[4], str):
-                title = inner[4]
-            # Timestamp is at [2][2][0]. Bind the ``[2]`` metadata block first so
-            # the ``[2]`` descent into it is a single-level index, not a chained
-            # ``inner[2][2]`` (an absent block legitimately leaves created_at None).
-            metadata_block = inner[2] if len(inner) > 2 and isinstance(inner[2], list) else None
-            if metadata_block is not None and len(metadata_block) > 2:
-                ts_data = metadata_block[2]
-                if isinstance(ts_data, list) and len(ts_data) > 0:
-                    created_at = _datetime_from_timestamp(ts_data[0])
+        # Title and the creation timestamp both come through the adapter:
+        # the timestamp slot (``row[1][2][2][0]``) is the SAME one ``NoteRow``
+        # decodes for the note path (issue #1529), so the position knowledge
+        # lives in one place rather than re-open-coding the inner descent here.
+        title = row.title
+        created_at = row.created_at
 
         return cls(
-            id=str(mind_map_id),
+            id=row.id,
             title=title,
             _artifact_type=ArtifactTypeCode.MIND_MAP.value,
             status=3,  # Mind maps are always "completed" once created
@@ -342,7 +357,8 @@ class Artifact:
         """Get the report subtype for type 2 artifacts.
 
         Returns:
-            'briefing_doc', 'study_guide', 'blog_post', or None if not a report.
+            'briefing_doc', 'study_guide', 'blog_post', 'report', or None if
+            not a report.
         """
         if self._artifact_type != ArtifactTypeCode.REPORT.value:
             return None
@@ -356,6 +372,62 @@ class Artifact:
         return "report"
 
 
+class GenerationState(str, Enum):
+    """The status string of an artifact generation task.
+
+    A ``str`` enum so existing string comparisons (``status == "completed"``),
+    membership checks, ``json.dumps``, ``f"{status}"``, and ``str(status)`` all
+    keep working unchanged. Member names map 1:1 onto the historical status
+    strings emitted by the poll/wait loops.
+    """
+
+    # poll-set: emitted by poll_status() / the generation parsers
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    NOT_FOUND = "not_found"
+    UNKNOWN = "unknown"
+    # wait-only: emitted by wait_for_completion() on a sustained delisting
+    REMOVED = "removed"
+
+    def __str__(self) -> str:
+        # Keep str(member) == member.value (e.g. "completed", not
+        # "GenerationState.COMPLETED") so display/serialization is unchanged.
+        return self.value
+
+    def __repr__(self) -> str:
+        # Keep repr(member) == repr(member.value) so console.print(status)
+        # of a GenerationStatus dataclass renders identically to the old
+        # plain-string field.
+        return repr(self.value)
+
+
+def _status_from_code(
+    code: int | None, *, none_status: GenerationState = GenerationState.PENDING
+) -> GenerationState:
+    """Map an API status code to a :class:`GenerationState` member.
+
+    ``None`` (no status reported yet) maps to ``none_status`` (``PENDING`` by
+    default). Any recognized code maps via :func:`artifact_status_to_str`;
+    unrecognized codes funnel to ``GenerationState.UNKNOWN``.
+
+    The range pin in ``tests/unit/test_generation_state.py`` proves that every
+    string ``artifact_status_to_str`` can return is a defined member today, so
+    the ``GenerationState(...)`` call cannot raise. The ``ValueError`` guard is
+    pure defense-in-depth against future schema drift (a new entry added to
+    ``_ARTIFACT_STATUS_MAP`` without a matching member): rather than blowing up
+    a poll loop, an unmapped string degrades to ``UNKNOWN``, mirroring
+    ``artifact_status_to_str``'s own "unknown for unrecognized codes" contract.
+    """
+    if code is None:
+        return none_status
+    try:
+        return GenerationState(artifact_status_to_str(code))
+    except ValueError:  # pragma: no cover - unreachable today (range pin), future-drift guard
+        return GenerationState.UNKNOWN
+
+
 @dataclass
 class GenerationStatus:
     """Status of an artifact generation task.
@@ -367,7 +439,10 @@ class GenerationStatus:
     """
 
     task_id: str  # Same as artifact_id - used for polling and becomes Artifact.id
-    status: str  # "pending", "in_progress", "completed", "failed", "not_found", "removed"
+    # "pending", "in_progress", "completed", "failed", "not_found", "removed", "unknown".
+    # Typed as GenerationState, but stays raw-string-permissive: instances built
+    # with a plain str keep working (the .is_* predicates compare with ==).
+    status: GenerationState
     url: str | None = None
     error: str | None = None
     error_code: str | None = None  # e.g., "USER_DISPLAYABLE_ERROR" for rate limits

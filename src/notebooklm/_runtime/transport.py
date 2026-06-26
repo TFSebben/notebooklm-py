@@ -41,7 +41,7 @@ The chain itself is reached by the transport through an injected
 ``chain_host._authed_post_chain`` live, late on every
 :meth:`perform_authed_post` call; this both breaks the construction
 cycle and preserves the long-standing test pattern of reassigning
-``core._chain_host._authed_post_chain`` to install a fake chain. The
+``core._composed.chain_host._authed_post_chain`` to install a fake chain. The
 :class:`AuthRefreshCoordinator` snapshot is reached via an injected
 ``snapshot_provider`` callable so :class:`RuntimeTransport` never has
 to hold a direct back-reference to the composition root.
@@ -60,7 +60,9 @@ from .._middleware.context import (
     RPC_CONTEXT_AUTH_SNAPSHOT,
     RPC_CONTEXT_BUILD_REQUEST,
     RPC_CONTEXT_DISABLE_INTERNAL_RETRIES,
+    RPC_CONTEXT_DISABLE_READ_TIMEOUT_RETRIES,
     RPC_CONTEXT_LOG_LABEL,
+    RPC_CONTEXT_READ_TIMEOUT,
     RPC_CONTEXT_REFRESH_BUDGET,
     RPC_CONTEXT_RPC_METHOD,
     RPC_CONTEXT_RPC_QUEUE_WAIT_SECONDS,
@@ -120,7 +122,7 @@ class RuntimeTransport:
         # :class:`MiddlewareChainHost` AFTER :class:`RuntimeTransport`
         # is constructed (the chain's leaf is :meth:`terminal`, so the
         # transport must exist first). Tests also reassign
-        # ``core._chain_host._authed_post_chain`` post-construction to
+        # ``core._composed.chain_host._authed_post_chain`` post-construction to
         # install a fake chain — going through a provider closure
         # (called late in :meth:`perform_authed_post`) ensures those
         # reassignments take effect on the next call without any
@@ -218,12 +220,14 @@ class RuntimeTransport:
         request = await self.refresh_request_for_current_auth(request)
         context = request.context
         log_label = context.get(RPC_CONTEXT_LOG_LABEL, "<unknown-chain-call>")
+        read_timeout = context.get(RPC_CONTEXT_READ_TIMEOUT)
         start = time.perf_counter()
         try:
             response = await self._kernel.post(
                 request.url,
                 headers=request.headers,
                 body=request.body,
+                read_timeout=read_timeout,
             )
         except (httpx.HTTPStatusError, httpx.RequestError) as exc:
             raise_mapped_post_error(
@@ -242,6 +246,8 @@ class RuntimeTransport:
         disable_internal_retries: bool = False,
         rpc_method: str | None = None,
         refresh_budget: RefreshBudget | None = None,
+        read_timeout: float | None = None,
+        disable_read_timeout_retries: bool = False,
     ) -> httpx.Response:
         """Authed POST entry point — routes through the middleware chain.
 
@@ -286,6 +292,10 @@ class RuntimeTransport:
             RPC_CONTEXT_DISABLE_INTERNAL_RETRIES: disable_internal_retries,
             RPC_CONTEXT_RPC_METHOD: rpc_method,
         }
+        if read_timeout is not None:
+            context[RPC_CONTEXT_READ_TIMEOUT] = read_timeout
+        if disable_read_timeout_retries:
+            context[RPC_CONTEXT_DISABLE_READ_TIMEOUT_RETRIES] = True
         # Only seed the shared refresh budget when one is supplied. Callers
         # that drive the chain without a budget (the chat path) leave the key
         # ABSENT, matching the ``RPC_CONTEXT_REFRESH_BUDGET`` docstring; the

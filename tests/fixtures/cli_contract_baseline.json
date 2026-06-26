@@ -19,6 +19,7 @@
       "delete",
       "export",
       "get",
+      "get-prompt",
       "list",
       "poll",
       "rename",
@@ -51,6 +52,17 @@
       "slide-deck",
       "video"
     ],
+    "label": [
+      "add",
+      "create",
+      "delete",
+      "emoji",
+      "generate",
+      "list",
+      "remove",
+      "rename",
+      "sources"
+    ],
     "language": [
       "get",
       "list",
@@ -72,6 +84,7 @@
       "switch"
     ],
     "research": [
+      "cancel",
       "status",
       "wait"
     ],
@@ -141,6 +154,7 @@
         "delete",
         "export",
         "get",
+        "get-prompt",
         "list",
         "poll",
         "rename",
@@ -366,6 +380,58 @@
         }
       ],
       "short_help": "Get artifact details."
+    },
+    "artifact get-prompt": {
+      "class": "Command",
+      "params": [
+        {
+          "kind": "argument",
+          "name": "artifact_id",
+          "nargs": 1,
+          "required": true,
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": null,
+          "envvar": "NOTEBOOKLM_NOTEBOOK",
+          "has_custom_shell_complete": true,
+          "help": "Notebook ID (uses current if not set). Supports partial IDs.",
+          "is_flag": false,
+          "kind": "option",
+          "multiple": false,
+          "name": "notebook_id",
+          "opts": [
+            "-n",
+            "--notebook"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": false,
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "Output as JSON",
+          "is_flag": true,
+          "kind": "option",
+          "multiple": false,
+          "name": "json_output",
+          "opts": [
+            "--json"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "boolean"
+          }
+        }
+      ],
+      "short_help": "Show the generation prompt that produced..."
     },
     "artifact list": {
       "class": "Command",
@@ -1019,7 +1085,7 @@
           "default": null,
           "envvar": null,
           "has_custom_shell_complete": false,
-          "help": "HTTP request timeout in seconds (default: 30, from the library). Increase for long or complex prompts. (--timeout is a back-compat alias.)",
+          "help": "HTTP request/read timeout in seconds for this ask. Defaults to the library's chat timeout. (--timeout is a back-compat alias.)",
           "is_flag": false,
           "kind": "option",
           "multiple": false,
@@ -1044,6 +1110,7 @@
       "class": "Group",
       "commands": [
         "check",
+        "import-cookies",
         "inspect",
         "logout",
         "refresh"
@@ -1076,6 +1143,24 @@
           "default": false,
           "envvar": null,
           "has_custom_shell_complete": false,
+          "help": "With --test, validate read-only: never run NOTEBOOKLM_REFRESH_CMD, rotate cookies, or write to disk. For unattended health checks.",
+          "is_flag": true,
+          "kind": "option",
+          "multiple": false,
+          "name": "passive",
+          "opts": [
+            "--passive"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "boolean"
+          }
+        },
+        {
+          "default": false,
+          "envvar": null,
+          "has_custom_shell_complete": false,
           "help": "Output as JSON",
           "is_flag": true,
           "kind": "option",
@@ -1092,6 +1177,101 @@
         }
       ],
       "short_help": "Check authentication status and diagnose..."
+    },
+    "auth import-cookies": {
+      "class": "Command",
+      "params": [
+        {
+          "kind": "argument",
+          "name": "json_path",
+          "nargs": 1,
+          "required": true,
+          "type": {
+            "allow_dash": false,
+            "dir_okay": true,
+            "executable": false,
+            "exists": false,
+            "file_okay": true,
+            "name": "path",
+            "readable": true,
+            "resolve_path": false,
+            "writable": false
+          }
+        },
+        {
+          "default": [],
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "Opt in to persisting sibling-product cookies. Same syntax as 'notebooklm login --include-domains': youtube, docs, myaccount, mail, all. By default, only required Google auth/Drive/NotebookLM cookie domains are kept.",
+          "is_flag": false,
+          "kind": "option",
+          "multiple": true,
+          "name": "include_domains_raw",
+          "opts": [
+            "--include-domains"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": false,
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "Persist all optional sibling-product cookie domains.",
+          "is_flag": true,
+          "kind": "option",
+          "multiple": false,
+          "name": "include_optional",
+          "opts": [
+            "--include-optional"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "boolean"
+          }
+        },
+        {
+          "default": false,
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "Output as JSON",
+          "is_flag": true,
+          "kind": "option",
+          "multiple": false,
+          "name": "json_output",
+          "opts": [
+            "--json"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "boolean"
+          }
+        },
+        {
+          "default": false,
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "Suppress success output",
+          "is_flag": true,
+          "kind": "option",
+          "multiple": false,
+          "name": "quiet",
+          "opts": [
+            "--quiet"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "boolean"
+          }
+        }
+      ],
+      "short_help": "Import authentication cookies from JSON..."
     },
     "auth inspect": {
       "class": "Command",
@@ -1229,6 +1409,24 @@
           "opts": [
             "--quiet",
             "-q"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "boolean"
+          }
+        },
+        {
+          "default": false,
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "After refreshing, confirm a token fetch actually succeeds (read-only passive probe). Exit non-zero if the post-refresh cookies still fail.",
+          "is_flag": true,
+          "kind": "option",
+          "multiple": false,
+          "name": "verify",
+          "opts": [
+            "--verify"
           ],
           "required": false,
           "secondary_opts": [],
@@ -4917,7 +5115,7 @@
           "default": null,
           "envvar": null,
           "has_custom_shell_complete": false,
-          "help": "Custom instructions for the mind map (note-backed only)",
+          "help": "Custom prompt to steer the mind map. Applied reliably for the interactive kind; sent for note-backed too, but the server may ignore it.",
           "is_flag": false,
           "kind": "option",
           "multiple": false,
@@ -4932,10 +5130,10 @@
           }
         },
         {
-          "default": "note-backed",
+          "default": "interactive",
           "envvar": null,
           "has_custom_shell_complete": false,
-          "help": "Which mind map to generate: 'interactive' (studio artifact, polled to completion) or 'note-backed' (JSON tree, synchronous). The default becomes 'interactive' in v0.8.0.",
+          "help": "Which mind map to generate: 'interactive' (studio artifact, polled to completion) or 'note-backed' (JSON tree, synchronous).",
           "is_flag": false,
           "kind": "option",
           "multiple": false,
@@ -6255,6 +6453,587 @@
       ],
       "short_help": "Get conversation history or save it as a..."
     },
+    "label": {
+      "class": "Group",
+      "commands": [
+        "add",
+        "create",
+        "delete",
+        "emoji",
+        "generate",
+        "list",
+        "remove",
+        "rename",
+        "sources"
+      ],
+      "params": [],
+      "short_help": "Source-label management commands."
+    },
+    "label add": {
+      "class": "Command",
+      "params": [
+        {
+          "kind": "argument",
+          "name": "label_ref",
+          "nargs": 1,
+          "required": true,
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "kind": "argument",
+          "name": "source_ids",
+          "nargs": -1,
+          "required": true,
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": null,
+          "envvar": "NOTEBOOKLM_NOTEBOOK",
+          "has_custom_shell_complete": true,
+          "help": "Notebook ID (uses current if not set). Supports partial IDs.",
+          "is_flag": false,
+          "kind": "option",
+          "multiple": false,
+          "name": "notebook_id",
+          "opts": [
+            "-n",
+            "--notebook"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": false,
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "Output as JSON",
+          "is_flag": true,
+          "kind": "option",
+          "multiple": false,
+          "name": "json_output",
+          "opts": [
+            "--json"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "boolean"
+          }
+        }
+      ],
+      "short_help": "Add source(s) to a label (append; existing..."
+    },
+    "label create": {
+      "class": "Command",
+      "params": [
+        {
+          "kind": "argument",
+          "name": "name",
+          "nargs": 1,
+          "required": true,
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": null,
+          "envvar": "NOTEBOOKLM_NOTEBOOK",
+          "has_custom_shell_complete": true,
+          "help": "Notebook ID (uses current if not set). Supports partial IDs.",
+          "is_flag": false,
+          "kind": "option",
+          "multiple": false,
+          "name": "notebook_id",
+          "opts": [
+            "-n",
+            "--notebook"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": "",
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "Optional emoji for the label",
+          "is_flag": false,
+          "kind": "option",
+          "multiple": false,
+          "name": "emoji",
+          "opts": [
+            "--emoji"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": false,
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "Output as JSON",
+          "is_flag": true,
+          "kind": "option",
+          "multiple": false,
+          "name": "json_output",
+          "opts": [
+            "--json"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "boolean"
+          }
+        }
+      ],
+      "short_help": "Create an empty, manually-named label."
+    },
+    "label delete": {
+      "class": "Command",
+      "params": [
+        {
+          "kind": "argument",
+          "name": "label_refs",
+          "nargs": -1,
+          "required": true,
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": null,
+          "envvar": "NOTEBOOKLM_NOTEBOOK",
+          "has_custom_shell_complete": true,
+          "help": "Notebook ID (uses current if not set). Supports partial IDs.",
+          "is_flag": false,
+          "kind": "option",
+          "multiple": false,
+          "name": "notebook_id",
+          "opts": [
+            "-n",
+            "--notebook"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": false,
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "Skip confirmation",
+          "is_flag": true,
+          "kind": "option",
+          "multiple": false,
+          "name": "yes",
+          "opts": [
+            "--yes",
+            "-y"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "boolean"
+          }
+        },
+        {
+          "default": false,
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "Output as JSON",
+          "is_flag": true,
+          "kind": "option",
+          "multiple": false,
+          "name": "json_output",
+          "opts": [
+            "--json"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "boolean"
+          }
+        }
+      ],
+      "short_help": "Delete one or more labels (the label only,..."
+    },
+    "label emoji": {
+      "class": "Command",
+      "params": [
+        {
+          "kind": "argument",
+          "name": "label_ref",
+          "nargs": 1,
+          "required": true,
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "kind": "argument",
+          "name": "emoji_value",
+          "nargs": 1,
+          "required": true,
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": null,
+          "envvar": "NOTEBOOKLM_NOTEBOOK",
+          "has_custom_shell_complete": true,
+          "help": "Notebook ID (uses current if not set). Supports partial IDs.",
+          "is_flag": false,
+          "kind": "option",
+          "multiple": false,
+          "name": "notebook_id",
+          "opts": [
+            "-n",
+            "--notebook"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": false,
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "Output as JSON",
+          "is_flag": true,
+          "kind": "option",
+          "multiple": false,
+          "name": "json_output",
+          "opts": [
+            "--json"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "boolean"
+          }
+        }
+      ],
+      "short_help": "Set a label's emoji."
+    },
+    "label generate": {
+      "class": "Command",
+      "params": [
+        {
+          "default": null,
+          "envvar": "NOTEBOOKLM_NOTEBOOK",
+          "has_custom_shell_complete": true,
+          "help": "Notebook ID (uses current if not set). Supports partial IDs.",
+          "is_flag": false,
+          "kind": "option",
+          "multiple": false,
+          "name": "notebook_id",
+          "opts": [
+            "-n",
+            "--notebook"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": "unlabeled",
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "'unlabeled' (safe, default) labels only unlabeled sources; 'all' WIPES and regenerates every label (destructive).",
+          "is_flag": false,
+          "kind": "option",
+          "multiple": false,
+          "name": "scope",
+          "opts": [
+            "--scope"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "case_sensitive": false,
+            "choices": [
+              "all",
+              "unlabeled"
+            ],
+            "name": "choice"
+          }
+        },
+        {
+          "default": false,
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "Skip confirmation for --scope all",
+          "is_flag": true,
+          "kind": "option",
+          "multiple": false,
+          "name": "yes",
+          "opts": [
+            "--yes",
+            "-y"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "boolean"
+          }
+        },
+        {
+          "default": false,
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "Output as JSON",
+          "is_flag": true,
+          "kind": "option",
+          "multiple": false,
+          "name": "json_output",
+          "opts": [
+            "--json"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "boolean"
+          }
+        }
+      ],
+      "short_help": "AI-group sources into topic labels (the..."
+    },
+    "label list": {
+      "class": "Command",
+      "params": [
+        {
+          "default": null,
+          "envvar": "NOTEBOOKLM_NOTEBOOK",
+          "has_custom_shell_complete": true,
+          "help": "Notebook ID (uses current if not set). Supports partial IDs.",
+          "is_flag": false,
+          "kind": "option",
+          "multiple": false,
+          "name": "notebook_id",
+          "opts": [
+            "-n",
+            "--notebook"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": false,
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "Output as JSON",
+          "is_flag": true,
+          "kind": "option",
+          "multiple": false,
+          "name": "json_output",
+          "opts": [
+            "--json"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "boolean"
+          }
+        }
+      ],
+      "short_help": "List all labels in a notebook (with member..."
+    },
+    "label remove": {
+      "class": "Command",
+      "params": [
+        {
+          "kind": "argument",
+          "name": "label_ref",
+          "nargs": 1,
+          "required": true,
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "kind": "argument",
+          "name": "source_ids",
+          "nargs": -1,
+          "required": true,
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": null,
+          "envvar": "NOTEBOOKLM_NOTEBOOK",
+          "has_custom_shell_complete": true,
+          "help": "Notebook ID (uses current if not set). Supports partial IDs.",
+          "is_flag": false,
+          "kind": "option",
+          "multiple": false,
+          "name": "notebook_id",
+          "opts": [
+            "-n",
+            "--notebook"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": false,
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "Output as JSON",
+          "is_flag": true,
+          "kind": "option",
+          "multiple": false,
+          "name": "json_output",
+          "opts": [
+            "--json"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "boolean"
+          }
+        }
+      ],
+      "short_help": "Un-assign source(s) from a label (the..."
+    },
+    "label rename": {
+      "class": "Command",
+      "params": [
+        {
+          "kind": "argument",
+          "name": "label_ref",
+          "nargs": 1,
+          "required": true,
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "kind": "argument",
+          "name": "new_name",
+          "nargs": 1,
+          "required": true,
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": null,
+          "envvar": "NOTEBOOKLM_NOTEBOOK",
+          "has_custom_shell_complete": true,
+          "help": "Notebook ID (uses current if not set). Supports partial IDs.",
+          "is_flag": false,
+          "kind": "option",
+          "multiple": false,
+          "name": "notebook_id",
+          "opts": [
+            "-n",
+            "--notebook"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": false,
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "Output as JSON",
+          "is_flag": true,
+          "kind": "option",
+          "multiple": false,
+          "name": "json_output",
+          "opts": [
+            "--json"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "boolean"
+          }
+        }
+      ],
+      "short_help": "Rename a label (preserves its emoji)."
+    },
+    "label sources": {
+      "class": "Command",
+      "params": [
+        {
+          "kind": "argument",
+          "name": "label_ref",
+          "nargs": 1,
+          "required": true,
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": null,
+          "envvar": "NOTEBOOKLM_NOTEBOOK",
+          "has_custom_shell_complete": true,
+          "help": "Notebook ID (uses current if not set). Supports partial IDs.",
+          "is_flag": false,
+          "kind": "option",
+          "multiple": false,
+          "name": "notebook_id",
+          "opts": [
+            "-n",
+            "--notebook"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": false,
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "Output as JSON",
+          "is_flag": true,
+          "kind": "option",
+          "multiple": false,
+          "name": "json_output",
+          "opts": [
+            "--json"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "boolean"
+          }
+        }
+      ],
+      "short_help": "Expand a label to its source objects..."
+    },
     "language": {
       "class": "Group",
       "commands": [
@@ -7103,9 +7882,11 @@
         "download",
         "generate",
         "history",
+        "label",
         "language",
         "list",
         "login",
+        "mcp",
         "metadata",
         "note",
         "profile",
@@ -7115,6 +7896,7 @@
         "skill",
         "source",
         "status",
+        "suggest-prompts",
         "summary",
         "use"
       ],
@@ -7422,11 +8204,64 @@
     "research": {
       "class": "Group",
       "commands": [
+        "cancel",
         "status",
         "wait"
       ],
       "params": [],
       "short_help": "Research management commands."
+    },
+    "research cancel": {
+      "class": "Command",
+      "params": [
+        {
+          "kind": "argument",
+          "name": "run_id",
+          "nargs": 1,
+          "required": true,
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": null,
+          "envvar": "NOTEBOOKLM_NOTEBOOK",
+          "has_custom_shell_complete": true,
+          "help": "Notebook ID (uses current if not set). Supports partial IDs.",
+          "is_flag": false,
+          "kind": "option",
+          "multiple": false,
+          "name": "notebook_id",
+          "opts": [
+            "-n",
+            "--notebook"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": false,
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "Output as JSON",
+          "is_flag": true,
+          "kind": "option",
+          "multiple": false,
+          "name": "json_output",
+          "opts": [
+            "--json"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "boolean"
+          }
+        }
+      ],
+      "short_help": "Cancel an in-flight research run."
     },
     "research status": {
       "class": "Command",
@@ -9274,6 +10109,24 @@
           "default": null,
           "envvar": null,
           "has_custom_shell_complete": false,
+          "help": "Only list sources in this label (label id, partial prefix, or exact name).",
+          "is_flag": false,
+          "kind": "option",
+          "multiple": false,
+          "name": "label_filter",
+          "opts": [
+            "--label"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": null,
+          "envvar": null,
+          "has_custom_shell_complete": false,
           "help": "Show at most N rows. 0 = show no rows. Omit for unlimited. Applies to both text and --json output.",
           "is_flag": false,
           "kind": "option",
@@ -9628,6 +10481,104 @@
       ],
       "short_help": "Show current context (active notebook and..."
     },
+    "suggest-prompts": {
+      "class": "Command",
+      "params": [
+        {
+          "default": null,
+          "envvar": "NOTEBOOKLM_NOTEBOOK",
+          "has_custom_shell_complete": true,
+          "help": "Notebook ID (uses current if not set). Supports partial IDs.",
+          "is_flag": false,
+          "kind": "option",
+          "multiple": false,
+          "name": "notebook_id",
+          "opts": [
+            "-n",
+            "--notebook"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": 4,
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "Suggestion surface to target (1-9, default 4). 4=default chat questions, 5=critique, 6=audio/debate, 8=quiz, 9=flashcards. Out-of-range values exit 1 with a validation error.",
+          "is_flag": false,
+          "kind": "option",
+          "multiple": false,
+          "name": "mode",
+          "opts": [
+            "--mode"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "integer"
+          }
+        },
+        {
+          "default": null,
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "Free-text steer for the kind of prompts to suggest.",
+          "is_flag": false,
+          "kind": "option",
+          "multiple": false,
+          "name": "query",
+          "opts": [
+            "--query"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": "Sentinel.UNSET",
+          "envvar": null,
+          "has_custom_shell_complete": true,
+          "help": "Limit to specific source IDs (can be repeated). Defaults to all sources.",
+          "is_flag": false,
+          "kind": "option",
+          "multiple": true,
+          "name": "source_ids",
+          "opts": [
+            "--source",
+            "-s"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "text"
+          }
+        },
+        {
+          "default": false,
+          "envvar": null,
+          "has_custom_shell_complete": false,
+          "help": "Output as JSON",
+          "is_flag": true,
+          "kind": "option",
+          "multiple": false,
+          "name": "json_output",
+          "opts": [
+            "--json"
+          ],
+          "required": false,
+          "secondary_opts": [],
+          "type": {
+            "name": "boolean"
+          }
+        }
+      ],
+      "short_help": "Get AI-suggested prompts for a notebook."
+    },
     "summary": {
       "class": "Command",
       "params": [
@@ -9759,9 +10710,11 @@
     "download",
     "generate",
     "history",
+    "label",
     "language",
     "list",
     "login",
+    "mcp",
     "metadata",
     "note",
     "profile",
@@ -9771,6 +10724,7 @@
     "skill",
     "source",
     "status",
+    "suggest-prompts",
     "summary",
     "use"
   ],
@@ -9778,6 +10732,7 @@
   "top_level_surfaces": {
     "chat": [
       "ask",
+      "suggest-prompts",
       "configure",
       "history"
     ],
@@ -9807,6 +10762,7 @@
     "notebook",
     "chat",
     "note",
+    "label",
     "share",
     "research"
   ]

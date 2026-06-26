@@ -1,9 +1,9 @@
-"""Tests for auth account profile + multi-account switching (split from tests/unit/test_auth.py for D1 PR-2).
+"""Tests for auth account profile + multi-account switching (split in D1 PR-2).
 
 This file owns one concern from the auth subpackage. The original
-``tests/unit/test_auth.py`` (4090 LOC) was split into six concern-aligned
-files alongside the deletion of ``_AuthFacadeModule``; see ADR-003
-(superseded) and ADR-007 (test-monkeypatch policy) for the rationale.
+monolithic auth test module was split into six concern-aligned files
+alongside the deletion of ``_AuthFacadeModule``; see ADR-0003
+(superseded) and ADR-0007 (test-monkeypatch policy) for the rationale.
 """
 
 import json
@@ -188,7 +188,7 @@ class TestAccountMetadata:
             assert storage_path == storage
             return {"authuser": 3, "email": "carol@example.com"}
 
-        # Seam-aliased object-attribute patch (ADR-007): patches the owning
+        # Seam-aliased object-attribute patch (ADR-0007): patches the owning
         # module so bare-name lookups inside ``_auth.account`` observe the fake.
         monkeypatch.setattr(_auth_account, "read_account_metadata", fake_read_account_metadata)
 

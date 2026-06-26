@@ -49,6 +49,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ._loop_affinity import assert_bound_loop
+from ._loop_bound import LoopBoundPrimitive
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +70,7 @@ class _TransportOperationToken:
     task: asyncio.Task[Any] | None
 
 
-class TransportDrainTracker:
+class TransportDrainTracker(LoopBoundPrimitive):
     """Track in-flight transport operations and gate graceful shutdown.
 
     Owns four pieces of state:
@@ -101,26 +102,17 @@ class TransportDrainTracker:
         self._operation_depths: weakref.WeakKeyDictionary[asyncio.Task[Any], int] = (
             weakref.WeakKeyDictionary()
         )
-        # Loop-affinity guard. Set by :meth:`ClientLifecycle.open`
-        # so :meth:`drain` can short-circuit cross-loop misuse before
-        # touching the lazily-built ``_drain_condition`` (which is bound
-        # to the loop that constructed it). ``None`` is a silent no-op
-        # for standalone fixtures.
-        self._bound_loop: asyncio.AbstractEventLoop | None = None
-        # ADR-014 Rule 1: close-time drain hooks are owned here, not on
+        # ``_bound_loop`` (the loop-affinity guard consulted by
+        # :meth:`drain` / :meth:`begin_transport_post` before touching the
+        # lazy ``_drain_condition``) is provided by the
+        # :class:`~notebooklm._loop_bound.LoopBoundPrimitive` base, which also
+        # owns ``set_bound_loop``. This tracker only stores the binding, so it
+        # uses the default no-op ``_on_loop_rebind``.
+        # ADR-0014 Rule 1: close-time drain hooks are owned here, not on
         # the client. Insertion order is preserved (Python 3.7+ dict
         # invariant) and :meth:`run_drain_hooks` fires them in that order
         # under ``ClientLifecycle.close``.
         self._drain_hooks: dict[str, Callable[[], Awaitable[None]]] = {}
-
-    def set_bound_loop(self, loop: asyncio.AbstractEventLoop | None) -> None:
-        """Capture or clear the event-loop binding for the affinity guard.
-
-        :meth:`ClientLifecycle.open` propagates the captured loop here so
-        :meth:`drain` can short-circuit cross-loop misuse. Passing ``None``
-        clears the binding for the next ``open()`` (which will rebind).
-        """
-        self._bound_loop = loop
 
     def reset_after_open(self) -> None:
         """Clear the drain flag so a reopened client admits new transport work.
@@ -245,7 +237,7 @@ class TransportDrainTracker:
 
     @asynccontextmanager
     async def operation_scope(self, label: str) -> AsyncIterator[None]:
-        """Drain-tracked operation scope for feature-owned work (ADR-014 Rule 1).
+        """Drain-tracked operation scope for feature-owned work (ADR-0014 Rule 1).
 
         Wraps :meth:`begin_transport_post` / :meth:`finish_transport_post`
         so feature code can write ``async with tracker.operation_scope("upload"):``
@@ -262,7 +254,7 @@ class TransportDrainTracker:
     def register_drain_hook(self, name: str, hook: Callable[[], Awaitable[None]]) -> None:
         """Register or replace a feature-owned close-time drain hook.
 
-        Per ADR-014 Rule 1, this tracker owns the drain-hook storage so
+        Per ADR-0014 Rule 1, this tracker owns the drain-hook storage so
         ``DrainHookRegistration`` is satisfied directly.
         ``ClientLifecycle.close`` fires registered hooks via
         :meth:`run_drain_hooks`.

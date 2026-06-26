@@ -86,7 +86,13 @@ def mock_core():
     # Individual tests that need to inspect the URL/body can read
     # ``core._last_chat_request`` after calling ``ChatAPI.ask``. The
     # chat-side ``parse_label`` is forwarded as ``log_label``.
-    async def _perform_authed_post_default(*, build_request, log_label):
+    async def _perform_authed_post_default(
+        *,
+        build_request,
+        log_label,
+        read_timeout=None,
+        disable_read_timeout_retries=False,
+    ):
         snapshot = AuthSnapshot(
             csrf_token=auth.csrf_token,
             session_id=auth.session_id,
@@ -115,7 +121,7 @@ def mock_core():
 
     # Assemble the bag-of-attributes fixture in one ``SimpleNamespace`` call
     # so every collaborator slot ``ChatAPI`` and ``ArtifactsAPI`` read from
-    # the fixture lands at construction time. ADR-007 specifically forbids
+    # the fixture lands at construction time. ADR-0007 specifically forbids
     # the ``core.<attr> = <value>`` re-assignment pattern (which is why this
     # is *not* built via ``make_fake_core`` + post-construction stubs); the
     # SimpleNamespace constructor satisfies the policy by setting every
@@ -177,7 +183,7 @@ def mock_notebooks_api():
 def _chat_from_mock_core(mock_core, *, notebooks=None) -> ChatAPI:
     """Build a ``ChatAPI`` from the ``mock_core`` fixture's surfaces.
 
-    Wave 8 of session-decoupling (ADR-014 Rule 2 Corollary): ``ChatAPI``
+    Wave 8 of session-decoupling (ADR-0014 Rule 2 Corollary): ``ChatAPI``
     takes its four direct collaborators by keyword arg. The legacy single-
     arg ``ChatAPI(mock_core)`` form is gone; this helper preserves the
     test shape by mapping the bag-of-attributes mock_core fixture onto
@@ -438,7 +444,7 @@ class TestArtifactsSourceSelection:
 
         # Video params structure:
         # [
-        #   [2], notebook_id,
+        #   client_options, notebook_id,
         #   [None, None, 3, source_ids_triple, None, None, None, None,
         #    [None, None, [source_ids_double, language, instructions, None, format_code, style_code]]]
         # ]
@@ -482,7 +488,7 @@ class TestArtifactsSourceSelection:
     async def test_generate_video_custom_style_prompt_encoding(
         self, mock_core, mock_mind_map_service
     ):
-        """Test custom video style prompt is encoded after the style code."""
+        """Test custom video style prompt is encoded like the live Web UI."""
         api = ArtifactsAPI(
             rpc=mock_core,
             drain=mock_core,
@@ -501,7 +507,7 @@ class TestArtifactsSourceSelection:
 
         params = mock_core.rpc_executor.rpc_call.call_args.args[1]
         video_config = params[2][8][2]
-        assert video_config[5] == VideoStyle.CUSTOM.value
+        assert video_config[5] is None
         assert video_config[6] == "Use hand-drawn diagrams"
 
     @pytest.mark.asyncio
@@ -626,7 +632,7 @@ class TestArtifactsSourceSelection:
 
         # Report params structure:
         # [
-        #   [2], notebook_id,
+        #   client_options, notebook_id,
         #   [None, None, 2, source_ids_triple, None, None, None,
         #    [None, [title, desc, None, source_ids_double, language, prompt, None, True]]]
         # ]
@@ -719,7 +725,7 @@ class TestArtifactsSourceSelection:
 
         # Quiz params structure:
         # [
-        #   [2], notebook_id,
+        #   client_options, notebook_id,
         #   [None, None, 4, source_ids_triple, ...]
         # ]
         inner_params = params[2]
@@ -1134,8 +1140,8 @@ class TestGetSourceIds:
     @pytest.mark.asyncio
     async def test_get_source_ids_extracts_correctly(self):
         """Test get_source_ids correctly extracts source IDs from notebook data."""
-        from _fixtures.fake_core import make_fake_core
         from notebooklm._notebooks import NotebooksAPI
+        from tests._fixtures.fake_core import make_fake_core
 
         rpc = AsyncMock()
         core = make_fake_core(rpc_call=rpc)
@@ -1163,8 +1169,8 @@ class TestGetSourceIds:
     @pytest.mark.asyncio
     async def test_get_source_ids_handles_empty_notebook(self):
         """Test get_source_ids handles notebook with no sources."""
-        from _fixtures.fake_core import make_fake_core
         from notebooklm._notebooks import NotebooksAPI
+        from tests._fixtures.fake_core import make_fake_core
 
         rpc = AsyncMock()
         core = make_fake_core(rpc_call=rpc)
@@ -1179,8 +1185,8 @@ class TestGetSourceIds:
     @pytest.mark.asyncio
     async def test_get_source_ids_handles_null_response(self):
         """Test get_source_ids handles null API response."""
-        from _fixtures.fake_core import make_fake_core
         from notebooklm._notebooks import NotebooksAPI
+        from tests._fixtures.fake_core import make_fake_core
 
         rpc = AsyncMock()
         core = make_fake_core(rpc_call=rpc)
@@ -1195,8 +1201,8 @@ class TestGetSourceIds:
     @pytest.mark.asyncio
     async def test_get_source_ids_handles_malformed_data(self):
         """Test get_source_ids handles malformed source data gracefully."""
-        from _fixtures.fake_core import make_fake_core
         from notebooklm._notebooks import NotebooksAPI
+        from tests._fixtures.fake_core import make_fake_core
 
         rpc = AsyncMock()
         core = make_fake_core(rpc_call=rpc)

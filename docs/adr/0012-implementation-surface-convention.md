@@ -1,15 +1,15 @@
-# ADR-012: Implementation surface convention (underscore-prefix policy)
+# ADR-0012: Implementation surface convention (underscore-prefix policy)
 
-> **Current state (2026-05-29).** The normative body and the illustrative tree
+> **Current state (2026-06-11).** The normative body and the illustrative tree
 > below were written when `_core.py`, `_session.py`, and the `_session_*.py`
 > seam modules still existed. **`_core.py` and `_session.py` (the concrete
-> `Session` orchestrator) have since been deleted**, and the `_session_*.py`
-> collaborators were renamed to `_runtime_*.py`
-> (e.g. `_session_config.py` → `_runtime_config.py`,
-> `_session_contracts.py` → `_runtime_contracts.py`). The underscore-prefix
+> `Session` orchestrator) have since been deleted**, and the former
+> `_session_*` / `_runtime_*` collaborators now live in the `_runtime/`
+> package (e.g. `_runtime/config.py`, `_runtime/contracts.py`,
+> `_runtime/lifecycle.py`, `_runtime/transport.py`) plus `_middleware/`.
+> The underscore-prefix
 > *policy* this ADR establishes is unchanged and still in force; only the
 > example module names are stale. The current module map lives in
-> [`CLAUDE.md`](../../CLAUDE.md) (Repository Structure) and
 > [`docs/architecture.md`](../architecture.md). Read in-body
 > `_core`/`_session`/`_session_*` mentions and exact line numbers as historical.
 
@@ -21,15 +21,14 @@ the retirement of the lifted `_core_*` modules.
 ## Context
 
 `notebooklm-py` has accumulated a deeply-seamed internal structure: at
-the time of this ADR, `src/notebooklm/` contains 13 public-named modules
-(`auth.py`, `client.py`, `config.py`, `exceptions.py`, `io.py`, `log.py`,
-`migration.py`, `notebooklm_cli.py`, `paths.py`, `research.py`,
+the time of this ADR, `src/notebooklm/` contains 14 public-named modules
+(`artifacts.py`, `auth.py`, `client.py`, `config.py`, `exceptions.py`,
+`io.py`, `log.py`, `migration.py`, `notebooklm_cli.py`, `paths.py`, `research.py`,
 `types.py`, `urls.py`, `utils.py`) and roughly 50 underscore-prefixed
-seam modules (`_session.py`, `_kernel.py`,
-`_session_contracts.py`, `_session_*`, `_request_types.py`,
-`_transport_errors.py`, `_streaming_post.py`,
-`_rpc_executor.py`, `_artifacts.py`, `_artifact_*.py`, `_chat.py`,
-`_chat_*.py`, `_middleware_*.py`, the `_auth/` subpackage, etc.).
+seam modules and subpackages (`_runtime/`, `_middleware/`, `_kernel.py`,
+`_request_types.py`, `_transport_errors.py`, `_streaming_post.py`,
+`_rpc_executor.py`, `_artifacts.py`, `_artifact/`, `_chat/`,
+`_source/`, `_row_adapters/`, the `_auth/` subpackage, etc.).
 The seam modules carry the bulk of the implementation; the
 public-named modules are mostly thin re-export facades or lifecycle
 entry points.
@@ -44,15 +43,16 @@ ownership names: `_session_config.py` (knobs), `_session_helpers.py`
 (pure utilities), `_request_types.py` (request construction),
 `_transport_errors.py` (transport error mapping), `_streaming_post.py` (HTTP),
 `_rpc_executor.py`
-(RPC dispatch), and so on. The same pattern applies inside
-`_artifact_*.py` and `_chat_*.py`.
+(RPC dispatch), and so on. Later refactors promoted the flat clusters
+into packages such as `_runtime/`, `_middleware/`, `_artifact/`,
+`_source/`, and `_chat/`.
 
 Downstream code, however, sees no documented rule that distinguishes
 "this module is the public API" from "this module is an implementation
 seam I should not import from." The `__init__.py` re-exports declare
 the *intended* public surface, but the seam modules are still
 directly importable — a `from`-import targeting an underscore-prefixed
-seam (e.g. importing `Session` directly from the `_session` seam)
+seam (e.g. importing `RuntimeTransport` directly from `_runtime/transport.py`)
 succeeds at runtime, and nothing in the package layout signals which
 imports are safe across releases.
 
@@ -66,7 +66,7 @@ Three facts shape this ADR:
    become public, it is re-exported from a non-underscore-prefixed
    module (typically `__init__.py`, `auth.py`, `exceptions.py`, or
    `types.py`); the underscore-prefixed source module stays internal.
-   ADR-003 (auth facade write-through) and the `_artifacts.py` →
+   ADR-0003 (auth facade write-through) and the `_artifacts.py` →
    `__init__.py` export pattern both rely on this rule.
 3. **The seam churn is high.** Tier-7 through Tier-13 moved
    ~40 distinct seams; that motion will continue. Pinning down which
@@ -99,6 +99,7 @@ three categories, signalled by its filename:
 ```text
 src/notebooklm/
 ├── __init__.py                  # re-export hub; declares the stable surface
+├── artifacts.py                 # public artifact retry helpers
 ├── client.py                    # NotebookLMClient + lifecycle helpers
 ├── auth.py                      # auth facade (almost flat re-exports; enumerate_accounts exception)
 ├── types.py                     # public dataclasses (Notebook, Source, ...)
@@ -134,14 +135,18 @@ shell scripts, so the names are preserved and their status is asserted
 in this ADR. New subpackages with the same status (public-looking name
 but internal contents) MUST be added to this list before merging.
 
+Newer adapter subpackages `notebooklm.mcp/` and `notebooklm.server/` also
+have public-looking names because they host console-script adapters, but their
+Python module internals are not part of the stable Python API; their user-facing
+contract is the installed command and documented tool/HTTP surface.
+
 ### 2. Implementation seams (single underscore prefix)
 
 ```text
 src/notebooklm/
-├── _session.py                  # Session concrete orchestrator
-├── _session_contracts.py        # Session/Kernel Protocols (Tier-13)
-├── _kernel.py                   # Kernel concrete (Tier-13)
-├── _session_*.py                # session helpers/config/lifecycle/auth
+├── _runtime/                    # runtime contracts/config/auth/lifecycle/transport/init
+├── _middleware/                 # middleware chain core, host, and middlewares
+├── _kernel.py                   # Kernel concrete transport core
 ├── _request_types.py            # authed POST request construction types
 ├── _transport_errors.py         # transport exceptions + POST error mapping
 ├── _streaming_post.py           # streaming POST helper
@@ -152,11 +157,12 @@ src/notebooklm/
 ├── _conversation_cache.py       # chat conversation cache
 ├── _polling_registry.py         # artifact polling registry
 ├── _cookie_persistence.py       # cookie save state
-├── _middleware_*.py             # middleware-chain modules
 ├── _artifacts.py                # ArtifactsAPI implementation
-├── _artifact_*.py               # per-concern artifact seams
-├── _chat.py                     # ChatAPI implementation
-├── _chat_*.py                   # per-concern chat seams
+├── _artifact/                   # per-concern artifact seams
+├── _chat/                       # ChatAPI implementation + chat helpers
+├── _source/                     # per-concern source seams
+├── _label/                      # label payload builders
+├── _row_adapters/               # strict positional RPC row adapters
 ├── _notebooks.py                # NotebooksAPI implementation
 ├── _sources.py, _notes.py, ...  # other feature implementations
 ├── _env.py                      # env-var resolvers (NOTEBOOKLM_*)
@@ -172,8 +178,8 @@ src/notebooklm/
 Seam modules are **not** subject to stability guarantees. Their public
 surface, internal layout, and module location can all change between
 any two releases. Downstream code that imports from a seam module
-(for example pulling `Session` out of the `_session` seam, or
-`is_strict_decode_enabled` out of the `_env` seam) is using an internal
+(for example pulling `RuntimeTransport` out of `_runtime/transport.py`)
+is using an internal
 API and accepts the cost of tracking those moves across releases. The
 library does not promise import-path stability for any name reachable
 only through an underscore-prefixed module.
@@ -211,6 +217,8 @@ deprecation policy in `docs/stability.md`: one release of
 `DeprecationWarning` from the public module, then removal in the next
 minor (0.x) or major (post-1.0) bump.
 
+<a id="demotion-consolidation-rule"></a>
+
 ### Demotion / consolidation rule
 
 The promotion rule above governs only the public-surface boundary
@@ -233,13 +241,13 @@ To balance the ratchet, two seam-tier consolidation triggers apply:
    self-describing).
 2. **Capability demotion.** When a capability that was previously
    promoted to a shared Protocol (per
-   [ADR-013](0013-composable-session-capabilities.md) §1, the ≥2
+   [ADR-0013](0013-composable-session-capabilities.md) §1, the ≥2
    feature-consumer rule) has dropped back to **a single consumer** —
    i.e. exactly one feature still types against it — that capability
    is a **candidate to demote** back into its sole consumer as a
    feature-local Protocol, mirroring the
    `ChatRuntime` / `ArtifactsRuntime` / `UploadRuntime` pattern in
-   ADR-013 §3.
+   ADR-0013 §3.
 
 Both triggers are *candidates*, not mandates: a reviewer may decline
 the fold/demotion (e.g. when the two siblings have meaningfully
@@ -250,19 +258,19 @@ fresh justification each time — not to force collapses against
 reviewer judgment.
 
 **Demotion does not require an ADR update.** It is the symmetric
-counterpart to ADR-013's promotion rule (also a standing rule that
+counterpart to ADR-0013's promotion rule (also a standing rule that
 applies per-PR, not per-ADR). A demotion or sibling fold is a normal
 refactor PR; it references this section as its policy basis, the same
-way a new shared Protocol references ADR-013 §1. Only a change to the
+way a new shared Protocol references ADR-0013 §1. Only a change to the
 *criteria themselves* (the <300-LOC threshold, the second-consumer
 count, or the mutual-isolation condition on cross-seam imports)
 requires an ADR amendment.
 
 This rule is paired with the underscore-prefix convention rather than
-with ADR-013 because the rule's *evidence* is module-level
+with ADR-0013 because the rule's *evidence* is module-level
 (file sizes, file-to-file imports inside `src/notebooklm/`) and the
 rule's *target* is the seam-tier file layout this ADR pins. The two
-ADRs read as a paired policy: ADR-013 §1 governs when a
+ADRs read as a paired policy: ADR-0013 §1 governs when a
 single-consumer capability becomes shared; this section governs when
 a previously-shared capability or an over-decomposed file pair
 collapses back.
@@ -280,7 +288,7 @@ collapses back.
   internal modules between releases as long as the public-named
   re-export modules continue to expose the same `__all__`.
 - New ADRs and refactor plans can reference the rule by name ("the
-  underscore-prefix convention from ADR-012") instead of restating
+  underscore-prefix convention from ADR-0012") instead of restating
   it each time, shortening planning artifacts and reducing ambiguity
   across the Tier-13+ refactor arc.
 - Static analysers (linters, IDEs) can be configured to warn on
@@ -296,29 +304,19 @@ collapses back.
   external-callsite imports from underscore-prefixed `notebooklm`
   submodules but cannot prevent them.
 - Some seams that *look* public-grade are not. For example,
-  `_env.is_strict_decode_enabled` (the topic of the sibling
-  ADR-011 flip) is a private seam that downstream code might
-  reasonably want to call to mirror the library's strict-decode
-  policy. The convention says: re-export it through a public module
-  (`config.py` or `__init__.py`) if that need is real, do not
-  encourage direct imports from the `_env` seam. PR 13.9b's audit
-  will enumerate which seam-level names have legitimate downstream
-  demand and promote those re-exports explicitly.
-- The Tier-13 `_session.py` / `_kernel.py` / `_session_contracts.py`
-  module triad is still pinned by ADR-010 with underscore prefixes
-  even though `Session` and `Kernel` are arguably the most-load-bearing
-  contracts in the post-Tier-13 architecture. That is consistent with
-  this ADR: the contracts are stable across the migration, but the
-  module *layout* (the split into three sibling files) is allowed to
-  re-organise behind the underscore-prefixed wall as the Tier-13 work
-  settles.
+  `_runtime/contracts.py`, `_runtime/transport.py`, `_kernel.py`, and
+  `_middleware/chain_host.py` are load-bearing first-party internals,
+  but downstream callers should still use the public facade or typed
+  client API rather than importing those modules directly. If a seam-level
+  name has legitimate downstream demand, promote a deliberate re-export
+  through a public module and pin it in the public API compat manifest.
 
 ## Alternatives considered
 
 **Drop the prefix convention and rely solely on `__all__`.** Rejected.
 `__all__` controls only `from foo import *` behaviour; named imports
 that reach directly into an underscore-prefixed seam (e.g. pulling
-`Session` out of the `_session` module by name) bypass it entirely.
+`RuntimeTransport` out of `_runtime/transport.py` by name) bypass it entirely.
 Using `__all__` as the sole stability fence would force consumers to
 consult the docs for every name to learn whether it is stable, and
 reviewers would have no filename-level signal during code review. The
@@ -334,27 +332,23 @@ exceeds the benefit for a single-process library.
 
 **Put all seams under a single `notebooklm._internal` subpackage.**
 Rejected. The seams are already organised by domain
-(`_session_*`, `_artifact_*`, `_chat_*`, `_middleware_*`); collapsing
+(`_runtime/`, `_artifact/`, `_chat/`, `_source/`, `_middleware/`); collapsing
 them under a single `_internal/` subpackage would either lose the
 domain grouping (one flat `_internal/` directory with 50 modules) or
 duplicate it (`_internal/core/`, `_internal/artifacts/`, ...) for no
 gain over the existing flat structure. The single-underscore prefix
 already accomplishes the "this is internal" signal without restructuring.
 
-**Promote `_env.is_strict_decode_enabled` to a public name in this PR
-(since ADR-011 lands the same release).** Rejected. ADR-011 pins the
-*behavior* (strict by default) and the *env-var contract*
-(`NOTEBOOKLM_STRICT_DECODE`). Downstream code controls behaviour by
-setting the env var, not by importing the helper. Exposing the
-helper as a public name would commit the library to a function-call
-API surface that has no current downstream demand and would couple
-two unrelated changes in the same PR. PR 13.9b's `__all__` audit is
-the right place to revisit which seam-level names have real downstream
-demand and merit promotion.
+**Promote the strict-decode helper to a public name in this PR.**
+Rejected. ADR-0011 now makes `safe_index` strict-only; downstream code
+does not need a public `is_strict_decode_enabled()` helper because there
+is no runtime policy choice to mirror. Exposing such a helper would
+commit the library to a function-call API surface with no current
+downstream demand.
 
-**Tie this ADR to ADR-010 (Session/Kernel split).** Rejected. ADR-010
-pins a specific contract shape (the Session/Kernel contract triad from ADR-010, now superseded by ADR-013). This ADR pins a *naming* convention
+**Tie this ADR to ADR-0010 (Session/Kernel split).** Rejected. ADR-0010
+pins a specific contract shape (the Session/Kernel contract triad from ADR-0010, now superseded by ADR-0013). This ADR pins a *naming* convention
 that applies across the entire `src/notebooklm/` tree. The two are
-complementary: ADR-010 says *what* the load-bearing contracts are;
+complementary: ADR-0010 says *what* the load-bearing contracts are;
 this ADR says *where* their implementation lives and how downstream
 code should reference them.

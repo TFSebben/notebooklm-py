@@ -1,7 +1,7 @@
 """Unit tests for :class:`ErrorInjectionMiddleware` (Tier-12 PR 12.6 / PR 12.7).
 
 Pins the contract documented in ``src/notebooklm/_middleware/error_injection.py``
-and ADR-009 §"Chain ordering":
+and ADR-0009 §"Chain ordering":
 
 - **Pass-through when env var is unset.** The middleware delegates straight
   to ``next_call``; production behavior is byte-for-byte unchanged.
@@ -13,12 +13,12 @@ and ADR-009 §"Chain ordering":
   resolves to ``"429"`` AND a builder is wired, the middleware raises
   :class:`TransportRateLimited` (carrying the synthetic ``Retry-After``);
   ``"5xx"`` raises :class:`TransportServerError`. This is the contract
-  that lets the OUTER ``RetryMiddleware`` retry, restoring ADR-009
+  that lets the OUTER ``RetryMiddleware`` retry, restoring ADR-0009
   §"ErrorInjection inside Retry — synthetic transient failures trigger
   retry" (codex iter-1 catch on PR 12.7).
-- **Return synthetic response for expired_csrf (HTTP 400).** That mode
-  surfaces as a returned :class:`RpcResponse` until PR 12.8's
-  ``AuthRefreshMiddleware`` intercepts and drives refresh-then-retry.
+- **Raise raw ``httpx.HTTPStatusError`` for expired_csrf (HTTP 400).** That
+  mode lets the OUTER ``AuthRefreshMiddleware`` catch via ``is_auth_error`` and
+  drive refresh-then-retry.
 - **Request shape preserved on the wrapped response.** The wrapped
   :class:`httpx.Response` (whether returned or carried in a raised
   exception) has a ``response.request`` attached whose
@@ -43,14 +43,15 @@ from __future__ import annotations
 import httpx
 import pytest
 
-# pytest puts ``tests/`` on ``sys.path``; ``_fixtures.chain`` is the canonical
-# import path documented in ``tests/_fixtures/__init__.py``.
-from _fixtures.chain import make_request
-from cassette_patterns import build_synthetic_error_response
 from notebooklm._error_injection import ERROR_INJECT_ENV_VAR
 from notebooklm._middleware.core import NextCall, RpcRequest, RpcResponse, build_chain
 from notebooklm._middleware.error_injection import ErrorInjectionMiddleware
 from notebooklm._transport_errors import TransportRateLimited, TransportServerError
+
+# The ``tests/`` package chain is complete; ``tests._fixtures.chain`` is the
+# fully-qualified import path documented in ``tests/_fixtures/__init__.py``.
+from tests._fixtures.chain import make_request
+from tests.cassette_patterns import build_synthetic_error_response
 
 
 def _static_terminal(response: httpx.Response) -> NextCall:
@@ -139,7 +140,7 @@ async def test_429_mode_raises_transport_rate_limited(
 ) -> None:
     """``429`` mode raises :class:`TransportRateLimited` for ``RetryMiddleware``.
 
-    Restores ADR-009 §"ErrorInjection inside Retry — synthetic transient
+    Restores ADR-0009 §"ErrorInjection inside Retry — synthetic transient
     failures trigger retry" (codex iter-1 catch on PR 12.7). The raised
     exception carries the synthetic ``Retry-After`` so the outer retry
     honors rate-limit timing.
@@ -357,7 +358,7 @@ async def test_auth_refresh_outside_error_injection_triggers_refresh_on_expired_
 
     Test shape: env var stays on across the retry leg, so the retry leg
     also raises ``HTTPStatusError(400)``. The exactly-once contract from
-    ADR-009 §"Retry semantics" means refresh runs exactly once and the
+    ADR-0009 §"Retry semantics" means refresh runs exactly once and the
     second 400 propagates without recursion.
     """
     from notebooklm._middleware.auth_refresh import AuthRefreshMiddleware

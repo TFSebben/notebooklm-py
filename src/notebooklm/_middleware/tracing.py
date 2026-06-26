@@ -1,6 +1,6 @@
 """TracingMiddleware — innermost middleware in the chain.
 
-Per ADR-009 §"Chain ordering", ``TracingMiddleware`` is
+Per ADR-0009 §"Chain ordering", ``TracingMiddleware`` is
 the **innermost** wrapper around the ``Kernel.post`` transport leaf. It logs one
 "starting" record before invoking ``next_call`` and one "completed"
 (success) or "failed" (exception) record after, capturing per-attempt
@@ -18,7 +18,7 @@ structured-logging consumers see them as ``LogRecord`` attributes):
 
 - ``rpc_method`` — value of ``RPC_CONTEXT_RPC_METHOD``, supplied via the
   ``rpc_method`` kwarg passed by ``RpcExecutor._execute_once``. ``None`` only
-  for the chat streaming path (``_chat.transport.send_authed_post`` — chat-side
+  for the chat streaming path (``_chat.transport.chat_aware_authed_post`` — chat-side
   requests are not classified RPCs) and for ``__new__``-built fixtures
   driving the chain directly.
 - ``log_label`` — value of ``RPC_CONTEXT_LOG_LABEL``. The middleware chain

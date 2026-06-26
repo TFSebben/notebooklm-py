@@ -9,109 +9,574 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `NOTEBOOKLM_FUTURE_ERRORS` opt-in preview flag — run the **v0.8.0 error
-  contract** early to test forward-compatibility before the breaking flips ship
-  (ADR-0019 / umbrella #1346). Default-off and **byte-identical** to current
-  v0.7.0 behavior; when truthy (`1`/`true`/`yes`/`on`) the three warn-runways
-  adopt their v0.8.0 raise-target: `sources.get` / `artifacts.get` /
-  `notes.get` / `mind_maps.get` raise the matching `*NotFoundError` on a miss
-  (#1247), `MappingCompatMixin` dict-subscript raises `TypeError` (#1251), and
-  the deprecated `ResearchAPI.wait_for_completion(interval=...)` alias raises
-  `TypeError` (#1254). Takes precedence over `NOTEBOOKLM_QUIET_DEPRECATIONS`
-  (a runway raises regardless of quiet). The four `get()` methods are now routed
-  through a single `_lookup.resolve_get` bridge, eliminating the hand-duplicated
-  warn-on-miss pattern. Helper: `notebooklm._deprecation.future_errors_enabled`.
-  The purely-behavioral v0.8.0 changes that lack a warn-runway (`delete()`
-  returning `None`, refusal-suppression, fail-loud listing) are not gated yet;
-  they will be folded in as their behavior is defined. Does **not** close
-  #1247/#1251/#1254 — the runways remain until the v0.8.0 flip. See
-  `docs/deprecations.md`. Additive (issue #1346).
-- `client.artifacts.retry_failed(notebook_id, artifact_id)` — retry a failed
-  Studio artifact in place (the web UI "Retry" action), via the new
-  `RETRY_ARTIFACT` (`Rytqqe`) RPC. The artifact is not deleted first and the
-  same `artifact_id` is preserved, so existing `poll_status()` /
-  `wait_for_completion()` flows keep working. Follows the ADR-019 "async
-  kickoff" contract: an accepted retry returns
-  `GenerationStatus(status="in_progress")`, while a synchronous refusal
-  (`USER_DISPLAYABLE_ERROR` — rate limit / quota / not-retryable) **raises** the
-  underlying `RateLimitError` / `RPCError` rather than returning a
-  `status="failed"` handle. New `notebooklm artifact retry <artifact_id>
-  [--wait] [--json]` CLI command. Additive (issues #1319, #1346).
-- `notebooklm.artifacts.with_rate_limit_retry` now also retries when the
-  wrapped callable **raises** `RateLimitError` (backing off and re-raising once
-  the retry budget is exhausted), so it can wrap the new `retry_failed`. The
-  existing returned-rate-limited-`GenerationStatus` path (used by `generate_*`)
-  is unchanged — this is a backward-compatible addition (issue #1319).
-- New public exception types for the note and mind-map domains, mirroring the
-  existing `SourceError` / `SourceNotFoundError` shape: `NoteError` +
-  `NoteNotFoundError` and `MindMapError` + `MindMapNotFoundError`. Each
-  `*NotFoundError` is a triple-base `(NotFoundError, RPCError, <Domain>Error)`,
-  so it is catchable via the cross-domain `NotFoundError` umbrella, at
-  transport-level `except RPCError` call sites, and at domain-level
-  `except NoteError` / `except MindMapError` call sites. These are the
-  prerequisite for the mind-map not-found work (ADR-019; issues #1291, #1346).
-  `MindMapNotFoundError` is now raised by the `mind_maps` mutation paths (see
-  *Changed* below); `NoteNotFoundError` is not raised by any method yet.
-- `ResearchStatus.NOT_FOUND` — a typed lifecycle sentinel for the
-  poll-observed absence of a *specific* requested research task, distinct from
-  `NO_RESEARCH` ("nothing in flight"). `research.poll(notebook_id, task_id=...)`
-  now returns `ResearchTask.not_found(task_id)` (status `NOT_FOUND`, carrying
-  the requested id) when a non-empty pinned `task_id` matches no in-flight task;
-  the unfiltered `task_id=None` empty poll still returns `NO_RESEARCH`
-  unchanged. Additive and non-breaking — the poll never raises for an absent
-  task (ADR-019 Rule 4; issues #1344, #1346).
+- **Retrieve the generation prompt behind an artifact** (#1571). New
+  `client.artifacts.get_prompt(notebook_id, artifact_id)` returns the free-text
+  prompt an artifact was generated from, and a matching `artifact get-prompt`
+  CLI command prints it (with `--json`). Works for every studio artifact type —
+  audio, report, video, quiz, flashcards, interactive mind map, infographic,
+  slide deck, and data table — by reading the prompt already present in the
+  `LIST_ARTIFACTS` response through the new `ArtifactRow.generation_prompt`
+  accessor (no new RPC). Returns `None` for an artifact with no stored prompt
+  (e.g. a note-backed mind map) and raises `ArtifactNotFoundError` for an
+  unknown id. The transport-neutral `_app.artifacts.get_artifact_prompt` exposes
+  the same behaviour to the MCP/HTTP adapters.
+- **Custom prompt for interactive mind maps.** `instructions` is now sent for
+  interactive (studio-artifact) mind maps, not just note-backed ones. The
+  interactive `CREATE_ARTIFACT` payload carries the free-text prompt at the
+  `[9][1][2]` slot of its options block — the same slot quizzes and flashcards
+  use — and the NotebookLM server honors it for variant 4 (verified live: the
+  prompt steers the generated node tree, and reads back via
+  `artifacts.get_prompt`). Previously `client.mind_maps.generate(...,
+  kind=INTERACTIVE, instructions=...)` and `notebooklm generate mind-map --kind
+  interactive --instructions ...` silently dropped the prompt with a warning;
+  both now apply it. The no-prompt request shape is unchanged. (Note-backed maps
+  still pass `instructions` through `GENERATE_MIND_MAP`, but the server does not
+  reliably act on them.)
+
+- **Passive auth validation for unattended monitors** (#1569). New
+  `notebooklm.auth.fetch_tokens_passive(...)` validates the cookies on disk with
+  a strictly read-only token fetch — it never runs `NOTEBOOKLM_REFRESH_CMD`,
+  never fires the layer-1 keepalive rotation poke, and never writes
+  `storage_state.json` (additive public symbol; the active
+  `fetch_tokens_with_domains` is unchanged). `notebooklm auth check --test
+  --passive` routes the token probe through it, so a systemd/cron health check
+  can answer "do the cookies currently authenticate?" without mutating state,
+  spawning a subprocess, or racing real work. The transport-neutral
+  `run_auth_check(AuthCheckPlan(..., passive=True))` exposes the same probe to
+  the MCP/HTTP adapters.
+
+- **`notebooklm auth refresh --verify`** (#1569). After a refresh completes,
+  runs the passive token probe to confirm the resulting cookies actually
+  authenticate, exiting non-zero if they still redirect to sign-in. A successful
+  refresh command alone does not prove the post-refresh cookies work — this is
+  especially valuable with `--browser-cookies`, which rewrites the cookie jar
+  but does not otherwise verify it.
+
+- **macOS login recovery hint.** When the bundled-Chromium interactive login
+  times out (`Login not detected within 5 minutes`), the message now suggests
+  retrying with `notebooklm login --browser chrome` to reuse an already
+  signed-in system Chrome session — which often detects immediately and sidesteps
+  bundled-Chromium issues on macOS.
+
+- **Layer-3 headless re-auth: `client.refresh_auth(allow_headless=True)`** (#1525,
+  P2; P1 was #1512). When NotebookLM's first-party cookies are fully dead — the
+  homepage GET 302s to the Google login page and neither token refresh (L1) nor
+  `RotateCookies` rotation (L2) can help — a persisted browser profile may still
+  hold a live Google SSO session that outlives `storage_state.json`. The new
+  opt-in re-auth layer drives an unattended **headless** browser against that
+  profile to silently re-mint cookies, then retries. It is **explicit by
+  default**: `refresh_auth(allow_headless=True)` (additive keyword-only,
+  defaults to `False`) triggers it on demand, and a *mid-RPC* auto-fire happens
+  only when `NOTEBOOKLM_HEADLESS_REAUTH=1` is set — L3 **never** fires by
+  default, so behavior with no opt-in and no profile is unchanged. Outcomes are
+  typed and honest (re-minted / profile-session-also-dead / unavailable) and it
+  never reports success on dead tokens. **SECURITY:** the persistent profile is
+  an account-equivalent credential; L3 is **local-unattended-only** and must not
+  be the auth path for a remote / hosted MCP server. It reuses the existing
+  cookie-domain allowlist and never logs a captured cookie value.
+
+- **`client.mind_maps.list_note_backed(notebook_id)`** — typed list of only
+  the **note-backed** mind maps (every `kind` is `NOTE_BACKED`, `tree`
+  populated, deleted rows excluded) via a single `GET_NOTES_AND_MIND_MAPS`
+  RPC — no `LIST_ARTIFACTS`. Factored out of `mind_maps.list()` (which now
+  builds on it) and used by the CLI `artifact delete` carve-out probe so the
+  note-backed membership check is fully typed while keeping the historical
+  single-RPC call set (recorded cassettes replay unchanged).
+
+- **Schema-drift observability: `rpc_decode_errors` counter + chat drift canary**
+  (#1492). Wire-schema drift is the stated #1 breakage class, but
+  decode/drift failures (`DecodingError` / `UnknownRPCMethodError`) were
+  invisible to metrics — they did not even reach the transport-leg
+  `rpc_calls_failed` counter (the middleware chain wraps only the transport
+  leg; decode happens after). `ClientMetricsSnapshot` now exposes a dedicated
+  `rpc_decode_errors` counter (additive, defaults to `0`, appended at the end
+  of the dataclass so existing positional construction is unaffected),
+  incremented at the executor's response-decode boundary whenever a decoded
+  response envelope is rejected as drift — both the wrapped shape-drift case
+  (bad JSON / missing key-or-index) and a surfaced `DecodingError` /
+  `UnknownRPCMethodError` from the envelope decoder. A decoded *semantic* error
+  (rate-limit, not-found, auth) is not drift and does not bump the counter; a
+  drift error recovered by refresh-and-retry is not counted. (Positional drift
+  raised later by feature-layer `safe_index` navigation, after `rpc_call`
+  returns, is not yet routed through this counter — a tracked follow-up.)
+  Operators can now alert on "Google reshaped a response" distinctly from
+  ordinary 5xx / network failures. Separately,
+  `scripts/check_rpc_health.py` now probes the streamed-chat orchestration RPC
+  `GenerateFreeFormStreamed` — a `PATH_NOT_METHOD` (`v1` URL) endpoint with no
+  obfuscated method ID — by asserting a 200 plus a recognizable stream frame,
+  closing the gap where the chat surface escaped the daily drift canary.
+
+- **Experimental: MCP server** (#1484, opt-in via the `mcp` extra). A
+  [Model Context Protocol](https://modelcontextprotocol.io) server exposing
+  NotebookLM to MCP clients (Claude Desktop / Code, Cursor, Windsurf) as 25 tools
+  across notebooks, sources, chat, notes, studio artifacts, and research — built
+  as a transport-neutral sibling adapter over the `_app/` layer (ADR-0021), so it
+  behaves identically to the equivalent `notebooklm` CLI command. Run it with the
+  `notebooklm-mcp` console script (stdio by default, or loopback HTTP via
+  `--transport http`); wire it into a client with `notebooklm mcp install
+  <client>` or the one-click `.mcpb` desktop bundle. Notebook- and source-scoped
+  tool arguments accept a **name or an id**; destructive tools require
+  `confirm=true` (returning a `needs_confirmation` preview otherwise); long-running
+  generation is non-blocking (`*_generate` returns a `task_id` to poll via
+  `*_status`, then download). **The MCP tool surface is experimental and not
+  covered by the library's semver guarantees** — names, parameters, and output
+  shapes may change between releases. `pip install notebooklm-py` is unaffected:
+  the server and its dependencies (`fastmcp`) arrive only with the `mcp` extra.
+  See [docs/mcp-guide.md](docs/mcp-guide.md).
 
 ### Changed
 
-- `ArtifactTimeoutError` now declares its bases umbrella-first
-  (`WaitTimeoutError, ArtifactError`), matching `SourceTimeoutError` and
-  `ResearchTimeoutError`. This is a cosmetic reorder with no behavior change:
-  `isinstance`/`except` against either base is unaffected.
-- `client.mind_maps` mutation sites now raise `MindMapNotFoundError` instead of
-  a bare `ValueError` on a missing target, so callers can `except NotFoundError`
-  (or `except MindMapError`) uniformly across namespaces. `rename` (and the
-  underlying note-backed `rename_mind_map`) raise it; `MindMapNotFoundError`
-  multi-inherits `ValueError`'s sibling `NotFoundError`, **not** `ValueError`
-  itself, so existing `except ValueError` rename callers must switch to
-  `except NotFoundError` / `except MindMapNotFoundError`. `delete(kind=None)` is
-  now **idempotent** — deleting an already-absent mind map returns `None` rather
-  than raising (matching `sources`/`artifacts`/`notes` delete, and the
-  `kind`-supplied path). `get_tree` returns `None` for a missing mind map (it is
-  a derived read that does not police parent existence) — previously `kind=None`
-  raised on an unknown id. Shape-drift in the interactive payload still raises
-  `UnknownRPCMethodError` (ADR-019; issues #1291, #1346).
-- `client.mind_maps.generate(kind=INTERACTIVE)` now raises
-  `ArtifactFeatureUnavailableError` (instead of a bare `ArtifactError`) when the
-  `CREATE_ARTIFACT` call returns no artifact id — no generation task was
-  created. **Non-breaking for `except ArtifactError`**:
-  `ArtifactFeatureUnavailableError` is a subclass of `ArtifactError`, so that
-  catch still works. (It also multi-inherits `RPCError`, so a handler that does
-  `except RPCError` *before* `except ArtifactError` will now take the `RPCError`
-  branch — the same MRO the sibling `generate_*` / `retry_failed` null-create
-  paths already produce.) This aligns the interactive async kickoff with that
-  sibling null-create contract (ADR-019 "async kickoff"; issue #1359).
-- Documented two pre-existing `client.mind_maps` read semantics (docs-only, no
-  behavior change): `list()` populates `MindMap.tree` only for note-backed
-  entries — interactive entries carry `tree=None` ("not fetched", not "empty";
-  call `get_tree(..., kind=INTERACTIVE)` to fetch one); and the explicit
-  `get_tree(..., kind=INTERACTIVE)` path delegates absence detection to the RPC,
-  so a missing id's value is server-dependent (returns `None` today) rather than
-  enforced client-side (issues #1355, #1359).
+- **Regenerable test baselines (Phase 1; contributor-facing, no public API
+  change).** Frozen public-surface snapshots that were hand-typed copies of
+  values the code already derives — `_FROZEN_TYPES_ALL` and
+  `_UNGATED_PUBLIC_ALL_SNAPSHOT` in
+  `tests/_guardrails/test_public_surface_manifest.py` — are now *derived*
+  baselines committed under `tests/fixtures/baselines/` (`types_all.json`,
+  `ungated_surface.json`) and registered in `tests/_baselines/registry.py`
+  alongside the existing CLI contract. A single freeze test diffs each committed
+  file against `derive()`; a dev-only `--update-baselines` pytest flag (wrapped by
+  `python scripts/regen_baselines.py`) regenerates them. Adding a public symbol is
+  now one regen command plus a reviewed diff instead of hand-editing several
+  literals. CI never regenerates — it only diffs (the regen flag is refused under
+  `CI`). The authored `_DOCUMENTED_PUBLIC_IMPORTS` (promised-import *intent*) and
+  `_TOP_LEVEL_TYPE_EXPORTS` (fuzzy derivation) stay hand-curated. See
+  [ADR-0022](docs/adr/0022-regenerable-baselines.md).
+- **`notebooklm.rpc` public surface narrowed to the two documented power-user
+  imports** (#1589). `notebooklm.rpc.__all__` now lists only `RPCMethod` and
+  `resolve_rpc_id`; the ~47 other names it used to advertise (the batchexecute
+  wire helpers `encode_rpc_request` / `decode_response` / `extract_rpc_result` /
+  …, the endpoint URL constants and helpers, `safe_index`, and the enum /
+  exception **re-exports** that remain public under their canonical names —
+  most enums as `notebooklm.<X>` / `notebooklm.types.<X>`, the exceptions as
+  `notebooklm.<X>` / `notebooklm.exceptions.<X>`, with `ArtifactStatus` /
+  `artifact_status_to_str` `notebooklm.types`-only and `ArtifactTypeCode` having
+  no public alias) are no longer part of the
+  blessed, compat-gated public surface. This aligns the audited surface with
+  `docs/stability.md`, which has always marked `notebooklm.rpc.*` internal. **Not
+  a removal:** every name stays importable as `notebooklm.rpc.<name>` for
+  back-compat — only the public-API *advertisement* shrank. New code should
+  import the canonical public name (or `RPCMethod` / `resolve_rpc_id` for
+  raw-RPC power use). See [docs/deprecations.md](docs/deprecations.md).
 
-### Deprecated
+- **`notebooklm.auth` public surface narrowed (PR-1)** (#1592). `auth.__all__`
+  drops 23 internal re-exports that only first-party `src`/tests imported (the
+  cookie-snapshot/storage helpers `save_cookies_to_storage` / `snapshot_cookie_jar`
+  / `CookieSnapshot*` / `CookieSaveResult` / `advance_cookie_snapshot_after_save`,
+  the WIZ-extraction helpers `extract_csrf_from_html` / `extract_session_id_from_html`
+  / `extract_wiz_field`, `authuser_query` / `format_authuser_value`,
+  `load_httpx_cookies` / `normalize_cookie_map`, `ALLOWED_COOKIE_DOMAINS` /
+  `MINIMUM_REQUIRED_COOKIES`, the env/URL constants `KEEPALIVE_ROTATE_URL` /
+  `NOTEBOOKLM_REFRESH_CMD_ENV` / `NOTEBOOKLM_REFRESH_CMD_USE_SHELL_ENV` /
+  `NOTEBOOKLM_DISABLE_KEEPALIVE_POKE_ENV`, `load_auth_from_storage`, `fetch_tokens`,
+  and `recover_psidts_in_memory`). These were migration leftovers from the
+  `_auth/*` extraction (ADR-0003 → ADR-0014); `docs/stability.md` has always marked
+  `notebooklm.auth.*` internal. **Not a removal:** every name stays importable as
+  `notebooklm.auth.<name>` for back-compat — first-party code now imports them from
+  their `notebooklm._auth.<sub>` home. The documented imports (`AuthTokens`,
+  `convert_rookiepy_cookies_to_storage_state`, the cookie-domain constants) and the
+  cohesive operations (`enumerate_accounts`, `fetch_tokens_with_domains`,
+  `fetch_tokens_passive`, …) are unchanged. See
+  [docs/deprecations.md](docs/deprecations.md).
 
-- **`client.mind_maps.get()` returning `None` for a missing mind map is now
-  deprecated**, closing the runway gap that left `mind_maps` as the only
-  #1247-cohort namespace without one. It now emits a `DeprecationWarning` on a
-  miss while **still returning `None`** (behavior unchanged this release),
-  matching `sources.get()` / `artifacts.get()` / `notes.get()`. In **v0.8.0** it
-  will instead **raise** `MindMapNotFoundError`. Use `get_or_none()` for the
-  sanctioned optional lookup (it stays silent), or migrate the `None`-check to a
-  `try/except MindMapNotFoundError`. The warning fires only on a miss; suppress
-  it with `NOTEBOOKLM_QUIET_DEPRECATIONS=1`. Tracking issue: #1247 (gap: #1358).
-  See [`docs/deprecations.md`](docs/deprecations.md).
+### Fixed
 
-## [0.7.0] - 2026-05-30
+- **Video Overview visual-style values now match the live NotebookLM Web UI**
+  (#1594). `VideoStyle` previously used stale numeric values, so several named
+  styles could serialize as the wrong style on the wire. `CUSTOM` now reflects
+  the UI's `0` value and is encoded the same way the Web UI sends it: the style
+  enum slot is omitted/defaulted and the custom visual-style prompt is appended
+  to the video config. Preset styles such as Whiteboard, Anime, Kawaii,
+  Watercolor, Heritage, and Paper-craft now use the current Web UI values.
+
+- **`notebooklm auth check` text mode now exits non-zero when an executed check
+  fails, matching `--json` mode** (#1569). Previously the Rich-table renderer
+  printed the failed checks but always exited `0`, so an unattended health check
+  using `auth check --test` (without `--json`) silently treated expired auth as
+  healthy — text and JSON modes had different process contracts. Both modes now
+  exit `0` only when every *executed* check passes (skipped checks — e.g. the
+  token fetch without `--test` — do not count as failures) and non-zero (`1`)
+  otherwise. Behavioral fix to the CLI exit-code contract; no API change.
+
+- **`Notebook.created_at` now reflects the true creation time instead of the
+  last-modified time; `Notebook.modified_at` is newly exposed.** The notebook
+  metadata block carries two timestamps — the creation instant at
+  `data[5][8][0]` (pinned across edits) and the last-modified instant at
+  `data[5][5][0]` (advances on every modification). `Notebook.from_api_response`
+  read the *modified* slot (`data[5][5]`) and labeled it `created_at`, so the
+  field — and everything built on it (`--json` output, `metadata` export, the
+  `Created` table column) — silently reported the last edit time. `created_at`
+  now reads the creation slot (`data[5][8]`), and the last-modified time is
+  surfaced additively as `Notebook.modified_at` (new field, defaults to `None`,
+  appended at the end so positional construction is unaffected; also added to
+  `NotebookMetadata.to_dict()` and the notebook `--json` envelopes). This
+  applies to both `notebooks.get()` and `notebooks.list()` (the homepage/recent
+  feed), which share the decode path. No signature change — `created_at` keeps
+  its type, only its source value is corrected — so this is a behavioral fix,
+  not an API-compat break, and `modified_at` is purely additive.
+- **Decoded `created_at` timestamps are now tz-aware UTC instead of naive
+  host-local time** (#1519). The shared decoder `_datetime_from_timestamp`
+  (backing `Notebook`/`Source`/`Artifact`/`MindMap.created_at`) called
+  `datetime.fromtimestamp(value)` with no `tz`, producing a **naive** datetime in
+  the host's local zone — so the same epoch surfaced as a different wall-time
+  string per machine, and `created_at.isoformat()` / `--json` output, the
+  `strftime` table cells, etc. mis-stated the absolute instant (a notebook
+  created `13:40:05` UTC rendered as the offset-less `08:40:05` under
+  `America/New_York`). It now returns `datetime.fromtimestamp(value, tz=utc)`:
+  the value is tz-aware UTC and host-independent. `.timestamp()` round-trips
+  unchanged, so internal sort/dedup/download ordering is provably unaffected —
+  only the rendered string changes (now offset-aware, identical everywhere).
+  This is the production sibling of the timezone slip pinned out of the #1511
+  golden VCR test.
+- **Artifact downloads re-validate every redirect hop against the trusted-host
+  allowlist (SSRF-adjacent)** (#1521). Both download clients
+  (`download_url` single + `download_urls_batch`) use
+  `follow_redirects=True`, but the host-allowlist + HTTPS gate validated only
+  the *initial* URL. A trusted Google URL whose `Location` pointed
+  off-allowlist — a non-HTTPS hop, or a private/link-local host such as
+  `169.254.169.254` / `localhost` — was followed and its body written to the
+  caller's `output_path`, defeating the explicit allowlist. (Google session
+  cookies were already not leaked to a non-Google redirect host — the stdlib
+  cookie policy is domain-scoped — so this never exposed credentials; the
+  residual harm was attacker-influenced bytes landing on the filesystem.) Both
+  clients now attach an httpx `request` event hook that re-checks every hop's
+  host + scheme **before the request is sent**, raising `ArtifactDownloadError`
+  on the first off-allowlist or non-HTTPS hop so the untrusted host never
+  receives a connection. Legitimate trusted→trusted redirects (Google
+  signed-URL CDNs already on the allowlist) are unaffected. The host-allowlist
+  check (`_is_trusted_download_host`) also no longer percent-decodes the host
+  before matching: decoding created a parser differential where
+  `evil%2egoogleapis.com` (`%2e`→`.`) was judged trusted while httpx connected
+  to the raw, non-Google host — the guard now matches the exact host httpx
+  connects to and rejects any host containing `%`.
+
+- **`source delete` now honors exact-id-wins over prefix matching, in lockstep
+  with `source get` / `rename` / `refresh`** (#1522). The delete-path resolver
+  (`_app/source_mutations.resolve_source_for_delete`) built its prefix-match
+  list and branched solely on `len(matches)` with no exact-id short-circuit, so
+  `source delete abc` raised `AMBIGUOUS_ID` when a notebook held both `abc` and
+  `abcdef` — even though the shared resolvers (`cli.resolve.resolve_partial_id_in_items`
+  and its `_app` twin `_app.resolve.resolve_ref`) both return on an exact
+  (case-insensitive) id match before evaluating prefixes, so the other verbs
+  resolved the same input. The delete resolver now mirrors that Rule 3: a
+  source whose id equals the input (case-insensitively) wins over any
+  longer-id prefix match (and is not treated as a partial expansion, so no
+  "Matched:" prose is emitted). Genuine prefix ambiguity (two strict prefixes,
+  no exact match) and the not-found / title-instead-of-id paths are unchanged.
+- **`Note.created_at` and note-backed `MindMap.created_at` are now populated**
+  (#1529). Both fields were declared `datetime | None` but never filled in,
+  even though the raw `GET_NOTES_AND_MIND_MAPS` / `CREATE_NOTE` responses carry
+  the creation timestamp in the note metadata envelope at `row[1][2][2][0]` —
+  the same slot the artifact path already decodes. `NoteRow` gains a
+  `created_at_raw` / `created_at` property pair (mirroring `ArtifactRow`) that
+  centralizes the descent behind named position constants, and every
+  note-creation surface now reads it: `notes.list` / `notes.get`,
+  `notes.create` (both the wrapped `[[id, …]]` and the flat
+  `[id, …]` CREATE_NOTE response shapes), `chat.save_answer_as_note`, and the
+  note-backed `mind_maps.list_note_backed` / `mind_maps.generate`.
+  `Artifact.from_mind_map` was lifted to reuse the shared `NoteRow` extraction
+  so the position knowledge lives in one place. Additive: absent / legacy
+  rows still yield `None`; no signature change.
+- **`profile` filesystem commands now surface a friendly error + exit 1
+  instead of a raw traceback** (#1520). The `profile delete` (`shutil.rmtree`),
+  `profile create` (directory materialization), `profile rename` (`os.rename`),
+  and text-mode `profile list` paths performed their pure-filesystem operations
+  unguarded, so an `OSError` — a half-deleted or locked profile directory, a
+  read-only mount, or a browser-profile file held by AV/the browser on Windows
+  — escaped `SectionedGroup.main` (which only catches `ClickException`/`Abort`)
+  and printed a Python traceback. Each now mirrors `profile switch`'s existing
+  `except OSError -> click.ClickException` idiom, yielding the documented
+  friendly-message + exit-1 CLI contract. The `--json profile list` path keeps
+  its existing `handle_errors` envelope (an unexpected `OSError` there stays the
+  `UNEXPECTED_ERROR` / exit-2 contract automation relies on).
+- **Runtime secret redaction now derives from one canonical registry, closing
+  several credential-disclosure gaps** (#1517, #1518). The logging redaction
+  cookie-name alternation in `_logging.py` was hand-enumerated and had drifted
+  from the project's own cassette sanitizer: the session cookies `NID`,
+  `LSOLH`, and `__Host-GAPS` (classified must-scrub by
+  `tests/cassette_patterns.py`) were absent, so a bare `NID=g.a000-…` token —
+  exactly what `_auth/refresh.py` logs at DEBUG from refresh-command
+  stdout/stderr through the redacting logger — passed through `scrub_secrets`
+  verbatim (#1517). Google API keys (`AIza…`) and any future `__Secure-*` /
+  `__Host-*` cookie carrying an opaque (non-token-shaped) value were also not
+  redacted at runtime. Separately, `UnknownRPCMethodError.data_at_failure` was
+  spliced unscrubbed with `!r` into `__str__` / `__repr__` / tracebacks (a
+  string splice that bypasses the logging `RedactingFilter`), unlike the
+  sibling `raw_response` which was already scrubbed, so a credential-shaped
+  indexed value leaked through every rendering regardless of `NOTEBOOKLM_DEBUG`
+  (#1518). All are fixed by a single canonical runtime registry
+  (`notebooklm._secrets`): `RUNTIME_SESSION_COOKIES` (the bare must-scrub cookie
+  names the redaction alternation now derives from), `SECURE_HOST_UMBRELLA_PATTERNS`
+  (`__Secure-*` / `__Host-*` prefix umbrellas whose name class spans the full
+  RFC 6265 `token` charset — any future secure/host cookie name fails closed by
+  construction), and `AUTH_TOKEN_SHAPE_PATTERNS` (carrier-agnostic
+  `g.a000-` / `sidts-` / `ya29.` token catch-alls plus the `AIza…` Google
+  API-key shape, ported from the cassette registry as defense in depth so a
+  secret under an unknown carrier name still fails closed). `data_at_failure`
+  (and the already-scrubbed `AuthExtractionError.payload_preview`) are routed
+  through `scrub_secrets`, so all three additions cover the exception surfaces
+  too. Every name-anchored value pattern (cookies, the `__Secure-*`/`__Host-*`
+  umbrellas, and the `at=`/`csrf=`/`f.sid=`/`upload_id=`/OAuth/`Bearer` query +
+  header forms) now also redacts an RFC 6265 / JSON **double-quoted** value
+  (`SID="opaque"`, `f.sid="opaque"`): the value class excluded `"`, so a quoted
+  value made the whole pattern miss and leaked verbatim — the optional
+  surrounding quotes redact the inner value while preserving the quotes. A
+  parity guardrail
+  (`tests/_guardrails/test_runtime_secret_registry_parity.py`) asserts the
+  runtime registry stays in lockstep with the cassette sanitizer on every axis:
+  bare-cookie superset, secure/host umbrella coverage by construction, and
+  regex-string equality of the credential-shape set — so a new must-scrub shape
+  added to the cassette registry forces the runtime registry to keep up.
+- **Playwright login: closing the browser during the final storage-state
+  capture now shows the browser-closed help instead of a bug-report prompt**
+  (#1514, deferred from the #1512 review). Every in-flow Playwright call in
+  the login flow (page recovery, the navigation retry loop, the login wait,
+  cookie-forcing) already mapped `TargetClosedError` to the friendly
+  `BROWSER_CLOSED_HELP` text + exit 1, but a closure in the narrow window
+  during the final `context.storage_state()` capture fell through the outer
+  handler's bare `raise` and exited 2 ("Unexpected error … please report a
+  bug"). The outer handler in `run_browser_capture` now recognizes
+  TargetClosed and surfaces the same help + exit 1; every other unexpected
+  failure keeps the exit-2 bug-report contract.
+- **Playwright storage-state filter hardened against malformed cookie rows
+  and exact-duplicate identities** (#1513, deferred from the #1512 review).
+  `filter_storage_state_cookies_by_domain_policy` no longer crashes the whole
+  persist when rookiepy / Playwright emits a malformed row: non-dict entries,
+  cookies whose `domain` is not a str, and cookies whose `name` is not a
+  non-empty str are skipped with one bounded `logger.warning` per row
+  (`reprlib` preview) instead of raising in `.get` / `.lstrip`. It also
+  dedups rows sharing an exact RFC 6265 identity `(name, domain, path)`
+  (path normalized via `or "/"`, matching every loader): the last occurrence
+  in capture order wins whole (fields are never merged), mirroring the
+  persistence-merge rule in `save_cookies_to_storage` where the newer
+  observation overwrites the stored row for the same key. Same-name rows on
+  *different* domains or paths are all kept — cross-domain same-name
+  resolution remains a load-time concern (the flat loaders rank by
+  `_auth_domain_priority`); deduping by bare name at write time would starve
+  the `(name, domain, path)`-keyed runtime loader
+  (`build_httpx_cookies_from_storage`), which legitimately holds e.g. the
+  per-product `OSID` cookie on `notebooklm.google.com` and
+  `myaccount.google.com` as distinct jar entries.
+
+- **Split-state PSIDTS recovery no longer writes a duplicate
+  `__Secure-3PSIDTS` row to `storage_state.json`** (#1523). On the
+  `--browser-cookies` path, when `__Secure-1PSIDTS` is missing/expired (so
+  recovery fires) but a fresh `__Secure-3PSIDTS` is already in the source jar,
+  Google's `RotateCookies` POST returns both rotated SIDTS cookies and the
+  in-memory recovery append loop emitted a second `__Secure-3PSIDTS` (and a
+  stale `__Secure-1PSIDTS` twin) entry with no analog in any real browser jar.
+  Auth still worked (the row is deduped on load), but the on-disk artifact
+  diverged from the true cookie set. `recover_psidts_in_memory` now keys the
+  source jar by RFC 6265 identity `(name, domain, path)` (path normalized via
+  `or "/"`, matching every loader) and overwrites the existing row in place
+  with the rotated occurrence instead of appending — exactly one row per key,
+  carrying the fresh value, mirroring the last-occurrence-wins dedup added to
+  `filter_storage_state_cookies_by_domain_policy` in #1513.
+
+- **`sources.add_text` no longer swallows typed transport errors into
+  `SourceAddError`.** Its bare `except RPCError` wrapped *everything* —
+  including the `RPCError` subclasses `RateLimitError`, `AuthError`, and
+  `ServerError` — so callers could not catch a rate-limited `add_text` to
+  back off via `retry_after` (or re-login on `AuthError`). It now re-raises
+  the narrow transport types unwrapped before wrapping only the residual
+  broad `RPCError`, matching the ADR-0019 catch ordering its siblings
+  `add_url`/`add_drive` already follow. The rule is now *enforced*, not just
+  documented: a new AST guardrail
+  (`tests/_guardrails/test_error_contract_catch_ordering.py`) fails any
+  `except RPCError` clause that wrap-and-raises a different exception class
+  without a preceding narrow-transport re-raise clause in the same `try`
+  (scope: `src/notebooklm/**` minus the `rpc/` protocol layer, where the
+  transport subtree originates).
+
+- **`notebooklm note create --json` no longer reports failure on every
+  successful create.** It previously emitted `{"id": null, "created": false,
+  "error": "Creation may have failed"}` for every note it successfully
+  created: a leftover raw-shape decoder in the `_app` layer went dead when
+  `notes.create` was typed to return a `Note` (it expected the retired
+  raw-list RPC shape and yielded `None` for a typed `Note`). The bug was
+  masked in the unit suite by stale raw-list mocks of `notes.create`. The CLI
+  now emits the real note id with `"created": true`; facade failures
+  propagate as exceptions through the standard CLI error handler instead of
+  a soft-failure envelope.
+
+- **14 positional-decode sites no longer fabricate wrong-but-valid values
+  silently on wire drift.** Guarded single-level reads of decoded
+  `batchexecute` payloads could swallow a Google reshape into a plausible
+  default — an empty notebook / mind-map id, an empty share email, a deleted
+  mind map leaking as live, a silently-empty chat history, a `LIST_NOTEBOOKS`
+  wrapper mis-dispatch feeding garbage rows, an unvalidated source type code,
+  and a note lookup flipping found → not-found. Per the #1485
+  absence-vs-malformed policy, genuine absence (short rows, `None` slots,
+  legitimately-empty containers) keeps its soft degrade, while
+  present-but-malformed data is now loud: the chat conversation-history walk
+  moved behind a new `ConversationTurnRow` adapter and raises
+  `UnknownRPCMethodError` on a truthy non-list payload or turns container
+  (malformed individual turn rows and unrecognized role codes are skipped
+  with a DEBUG diagnostic); `notebooks.list()` raises `DecodingError` on an
+  unrecognized payload shape; mind-map rows are decoded through `NoteRow`
+  and WARN when a null content slot lacks the soft-delete sentinel;
+  notebook-id, share-email, and source-type-code slots WARN with a bounded
+  payload preview when present-but-wrong-type (keeping list parsing alive);
+  and `notes.get_or_none` id matching reads through `NoteRow.id`. One
+  behavior nuance: `SharedUser.email` is now always a `str` — a `None` email
+  slot normalizes to `""` instead of leaking `None` through the `str`-typed
+  field.
+- **Chat citation-structure drift is no longer swallowed at DEBUG** (#1505
+  continuity — the last named survivor of that drift-swallow class). A Google
+  reshape of the streamed-chat citation structure previously degraded to
+  "answers with no citations" via a blanket `except → logger.debug → []` in
+  `parse_citations` — invisible, and it also discarded already-parsed
+  citations. Per the absence-vs-malformed policy: genuine absence (no type
+  block, short type block, `None`/empty citation slot — the routine "answer
+  without citations" shapes on real traffic) stays completely silent; a
+  truthy non-list where the citation *container* belongs (`first[4][3]`) is
+  structural wire drift and raises `UnknownRPCMethodError` (matching the
+  parser's existing `inner_data[0]` raise and `unwrap_conversation_turns`);
+  a present-but-unusable individual citation row now logs at least one
+  bounded WARNING and is skipped, so a good answer keeps its surviving
+  citations. Surviving citations keep their **raw wire ordinal** as
+  `citation_number` (a skipped row leaves a hole; with nothing skipped this
+  equals the dense numbering always produced), so the answer's literal `[N]`
+  markers never shift onto a different citation. Correspondingly,
+  save-as-note's positional marker fallback (`references[N-1]`) now applies
+  only when that positional reference carries no `citation_number`: a holed
+  marker drops its anchor with a warning instead of anchoring the wrong
+  chunk.
+- **Empty notebook summary no longer raises `UnknownRPCMethodError`** (#1485).
+  A brand-new, source-less notebook has no summary yet, so the `SUMMARIZE` RPC
+  returns an absent/`None` payload. `notebooks.get_summary()` and
+  `notebooks.get_description()` now treat that routine "no summary yet" state as
+  an empty summary (`""`) instead of mis-classifying it as wire-schema drift.
+  Genuinely-malformed payloads (a present-but-non-list `result[0]`, a scalar, or
+  a string where a nested list is expected) still raise. `get_summary` now shares
+  the `_extract_summary` descent with `get_description`, so both agree on every
+  shape. As part of the fix, `safe_index` rejects a `str`/`bytes` value at an
+  intermediate descent hop (it is indexable but never a valid container, so
+  descending it would smuggle a single character past drift detection).
+- **`download <type>` no longer exits 1 with no file written** (#1488). The
+  download path listed artifacts twice — the executor listed to select the
+  target, then each per-type download re-listed to re-find it by id — so the
+  second `LIST_ARTIFACTS` could not replay against a single-interaction VCR
+  cassette and aborted the download. The executor now lists once and threads
+  the already-fetched rows into the download method (which skips its redundant
+  second list); studio downloads also no longer trigger the note-backed
+  mind-map sub-fetch they never needed. Live behavior is unchanged for direct
+  `client.artifacts.download_*()` calls.
+
+## [0.8.0]
+
+This release lands the **breaking half** of the ADR-0019 error contract
+(umbrella #1346): "absence and refusal **raise**; only success and
+async-lifecycle state are returned." Every flip previewed under
+`NOTEBOOKLM_FUTURE_ERRORS` in v0.7.0 is now
+the default, and the preview flag — together with the dict-subscript / get-returns-
+None / kwarg-alias deprecation machinery — has been **removed** (#1365). See the
+[Upgrading to v0.8.0](docs/upgrading-to-0.8.0.md) guide.
+
+> **⚠ `NOTEBOOKLM_FUTURE_ERRORS` is gone.** It was the v0.7.0 forward-compat
+> preview gate; its target behavior is now unconditional, so the flag is a no-op
+> (setting it changes nothing). Remove it from your environment / CI config.
+
+### Breaking
+
+- **`sources` / `artifacts` / `notes` / `mind_maps` `.get()` raise on a miss**
+  (#1247). A genuine miss now raises the matching `*NotFoundError`
+  (`SourceNotFoundError` / `ArtifactNotFoundError` / `NoteNotFoundError` /
+  `MindMapNotFoundError`) instead of returning `None` (and the v0.7.0
+  `DeprecationWarning` is gone), matching `notebooks.get`. Return annotations
+  narrow from `X | None` to `X`. Use the unchanged, warning-free `get_or_none()`
+  for the sanctioned `None`-on-miss lookup, or wrap in `try/except *NotFoundError`.
+- **Typed research / mind-map / guide returns are attribute-only** (#1251). The
+  `MappingCompatMixin` dict-subscript bridge is removed from `ResearchTask` /
+  `ResearchStart` / `MindMapResult` / `SourceGuide` / `ResearchSource`:
+  `result["key"]` raises `TypeError`; `result.get(...)` / `.keys()` / `.items()` /
+  `.values()` raise `AttributeError`; `"k" in result` / `iter(result)` /
+  `len(result)` raise `TypeError`. Only attribute access (`result.status`,
+  `guide.keywords`, …) and `to_public_dict()` survive. `ResearchStatus` stays a
+  `str`-enum, so `status == "completed"` keeps working.
+- **`research.wait_for_completion(interval=...)` removed** (#1254). The deprecated
+  `interval=` keyword alias is gone (its v0.7.0 `DeprecationWarning` cycle is
+  complete); passing it now raises the standard `TypeError` for an unexpected
+  keyword. Use `initial_interval=` (same poll cadence).
+- **`generate mind-map` defaults to interactive** (#1272). The CLI
+  `notebooklm generate mind-map <nb>` (and `artifact`/`download` mind-map paths)
+  now default `--kind` to `interactive` instead of the note-backed JSON map. Pass
+  `--kind note-backed` to keep the note-backed behavior.
+- **`sources.refresh()` / `chat.delete_conversation()` return `None`** (#1290).
+  Both previously returned `True` on success (uninformative — any failure raised
+  first); they now return `None` and their annotations change from `-> bool` to
+  `-> None`. `chat.clear_cache(...)` is deliberately unchanged and stays `-> bool`
+  (its bool is meaningful).
+- **Synchronous generation-kickoff refusals raise** (#1342). `artifacts.generate_*`
+  and `revise_slide` no longer swallow a `USER_DISPLAYABLE_ERROR` refusal into a
+  `GenerationStatus(status="failed")` — they re-raise the underlying
+  `RateLimitError` / `RPCError`. `_parse_generation_result` raises
+  `ArtifactFeatureUnavailableError` / `DecodingError` on a missing artifact id.
+  `research.start` raises `DecodingError` on an empty / non-list payload or a
+  falsey `task_id` (return type narrows from `ResearchStart | None` to
+  `ResearchStart`). The public `artifacts.with_rate_limit_retry` helper retries
+  only on a *raised* `RateLimitError` and re-raises on budget exhaustion (a
+  returned rate-limited status is no longer a retry signal).
+- **Derived-read / lister drift raises `DecodingError`** (#1344). A
+  structurally-unrecognized RPC payload that previously collapsed to an empty
+  value now raises `DecodingError`, so callers can distinguish a genuine miss from
+  server-side shape drift: `sources.check_freshness()`, the note lister, and the
+  artifact raw lister reject malformed-but-truthy payloads. Legitimate
+  empty / stale shapes are unchanged.
+- **Mutate-existing ops fail loud on a missing target** (#1362). `notes.update`
+  preflights existence and raises `NoteNotFoundError` before firing the update
+  RPC; `sources.rename(..., return_object=False)` and
+  `artifacts.rename(..., return_object=False)` run the existence preflight on the
+  `False` path and raise `SourceNotFoundError` / `ArtifactNotFoundError` on a miss.
+  `return_object=False` still returns `None` on success.
+- **`NotebooksAPI.share()` removed + research poll/wait raise on ambiguity**
+  (#1363). The deprecated `client.notebooks.share()` is gone — use
+  `client.sharing.set_public(...)` + `client.notebooks.get_share_url(...)`.
+  `research.poll(task_id=None)` / `wait_for_completion(task_id=None)` now raise the
+  new `AmbiguousResearchTaskError` when two or more tasks are in flight (instead of
+  warning and guessing); with a single in-flight task they resolve it silently.
+- **Removed `NOTEBOOKLM_FUTURE_ERRORS` and the deprecation machinery** (#1365).
+  The forward-compat preview gate and the `warn_get_returns_none` /
+  `deprecated_kwarg` / `MappingCompatMixin` deprecation helpers are deleted now
+  that every break they previewed is the default. `warn_deprecated` and
+  `NOTEBOOKLM_QUIET_DEPRECATIONS` remain for future one-off deprecations.
+
+## [0.7.0] - 2026-06-04
+
+### Highlights
+
+- **v0.8.0 error-contract runway.** This release lands the *additive half* of a
+  cross-SDK convergence on "absence and refusal **raise**; only success and
+  async-lifecycle state are returned." You can adopt the forward-compatible form
+  today and run on both 0.7.0 and 0.8.0 with no flag day:
+  - **Test your code against 0.8.0 today** — set `NOTEBOOKLM_FUTURE_ERRORS=1` to
+    opt your process into the v0.8.0 error contract (`get()` raises
+    `*NotFoundError` on a miss, all dict-style access on the typed returns
+    (`[...]`, `.get()`, `in`, `.keys()`, …) raises, and
+    the deprecated `wait_for_completion(interval=...)` alias raises) **without
+    changing default behavior**. Run your test suite with it on to find breakage
+    before you upgrade. This is the "test-before-you-migrate" mechanism paired
+    with the [Upgrading to v0.8.0](docs/upgrading-to-0.8.0.md) guide.
+  - **`get_or_none()`** — a new, **silent** optional lookup on
+    `sources` / `artifacts` / `notes` / `mind_maps` that returns the object or
+    `None` and never warns. It is the sanctioned replacement for the now-soft
+    `get()`-returns-`None` pattern.
+  - **`get()` now warns on a miss** (still returns `None` this release) and will
+    **raise** the typed `*NotFoundError` for its domain in v0.8.0 (#1247).
+  - **Typed `*NotFoundError` per domain** — `NoteNotFoundError` /
+    `MindMapNotFoundError` join the existing source / artifact / notebook errors,
+    all catchable via the `NotFoundError` umbrella.
+- **Breaking: `rename()` returns the renamed object; `delete()` returns `None`.**
+  `rename()` now re-fetches and returns the live object (raising `*NotFoundError`
+  on a missing target), and `delete()` returns `None` and is idempotent on an
+  already-absent target. See **Breaking changes** below before upgrading.
+- **Typed dataclass returns** for `research.poll` / `start` /
+  `wait_for_completion`, `artifacts.generate_mind_map`, and `sources.get_guide`
+  (`ResearchStatus`, `ResearchTask`, `ResearchSource`, `ResearchStart`,
+  `MindMapResult`, `SourceGuide`) — attribute access instead of untyped dicts,
+  with a backward-compatible read-only mapping bridge.
+- **Unified `client.mind_maps` surface** over both backends (note-backed +
+  interactive), plus **`client.artifacts.retry_failed()`** to retry a failed
+  Studio artifact in place (and a matching `notebooklm artifact retry` command).
 
 ### Breaking changes
 
@@ -207,7 +672,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 >   two MINOR cycles of warnings served; the documented removal target was
 >   v0.7.0). It was a pure forwarder. Use `ChatAPI.save_answer_as_note(...)`,
 >   the canonical citation-rich saved-from-chat method and data owner
->   (ADR-013): `await client.chat.save_answer_as_note(nb_id, ask_result)`.
+>   (ADR-0013): `await client.chat.save_answer_as_note(nb_id, ask_result)`.
 >   The now-unused `save_chat_answer` injection plumbing on `NotesAPI` was
 >   removed with it.
 >
@@ -223,6 +688,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `get_or_none()` — the sanctioned **silent** optional lookup, added to
+  `client.sources` / `client.artifacts` / `client.notes` / `client.mind_maps`.
+  It returns the entity (`Source` / `Artifact` / `Note` / `MindMap`) or `None`
+  for a genuine absence and **never warns**, making it the drop-in migration
+  target for the now-deprecated `get()`-returns-`None` pattern (see
+  **Deprecated** below; issue #1247). Unlike `get()`, it does **not** swallow
+  transport, auth, or decode faults — only a real "not found" yields `None`.
+  ```python
+  # Silent optional lookup (no DeprecationWarning):
+  src = await client.sources.get_or_none(nb_id, source_id)
+  if src is None:
+      ...
+  ```
+  Additive (ADR-0019; issue #1247).
+- `NOTEBOOKLM_FUTURE_ERRORS` opt-in preview flag — run the **v0.8.0 error
+  contract** early to test forward-compatibility before the breaking flips ship
+  (ADR-0019 / umbrella #1346). Default-off and **byte-identical** to current
+  v0.7.0 behavior; when truthy (`1`/`true`/`yes`/`on`) the three warn-runways
+  adopt their v0.8.0 raise-target: `sources.get` / `artifacts.get` /
+  `notes.get` / `mind_maps.get` raise the matching `*NotFoundError` on a miss
+  (#1247), the **whole** `MappingCompatMixin` mapping surface — `[...]`
+  subscript plus the silent `get` / `keys` / `items` / `values` / `len` / `in` /
+  `iter` shims — raises the exact error a bare dataclass would (#1251), and
+  the deprecated `ResearchAPI.wait_for_completion(interval=...)` alias raises
+  `TypeError` (#1254). Takes precedence over `NOTEBOOKLM_QUIET_DEPRECATIONS`
+  (a runway raises regardless of quiet). The four `get()` methods are now routed
+  through a single `_lookup.resolve_get` bridge, eliminating the hand-duplicated
+  warn-on-miss pattern. Helper: `notebooklm._deprecation.future_errors_enabled`.
+  The flag now **also** previews the purely-behavioral v0.8.0 changes that have
+  no warn-runway (#1405): the uninformative `bool` returns of `sources.refresh`
+  and `chat.delete_conversation` become `None` (#1290); a synchronous generation
+  refusal **raises** the decoder's `RateLimitError` / `RPCError` /
+  `DecodingError` / `ArtifactFeatureUnavailableError` instead of being swallowed
+  into `GenerationStatus(status="failed")` / returned `None` — across
+  `_call_generate`, `revise_slide`, `_parse_generation_result`, and
+  `research.start` (#1342); and the mutate-existing ops `notes.update` and
+  `sources`/`artifacts` `rename(return_object=False)` fail loud with a
+  `*NotFoundError` on a missing target (#1362). These previews are runtime-only —
+  **no public return annotation changes** until the v0.8.0 flip — so default-off
+  stays byte-identical. Does **not** close #1247/#1251/#1254/#1290/#1342/#1362 —
+  the runways and current behavior remain until the v0.8.0 flip. See
+  `docs/deprecations.md`. Additive (issues #1346, #1405).
+- `client.artifacts.retry_failed(notebook_id, artifact_id)` — retry a failed
+  Studio artifact in place (the web UI "Retry" action), via the new
+  `RETRY_ARTIFACT` (`Rytqqe`) RPC. The artifact is not deleted first and the
+  same `artifact_id` is preserved, so existing `poll_status()` /
+  `wait_for_completion()` flows keep working. Follows the ADR-0019 "async
+  kickoff" contract: an accepted retry returns
+  `GenerationStatus(status="in_progress")`, while a synchronous refusal
+  (`USER_DISPLAYABLE_ERROR` — rate limit / quota / not-retryable) **raises** the
+  underlying `RateLimitError` / `RPCError` rather than returning a
+  `status="failed"` handle. New `notebooklm artifact retry <artifact_id>
+  [--wait] [--json]` CLI command. Additive (issues #1319, #1346).
+- `notebooklm.artifacts.with_rate_limit_retry` now also retries when the
+  wrapped callable **raises** `RateLimitError` (backing off and re-raising once
+  the retry budget is exhausted), so it can wrap the new `retry_failed`. The
+  existing returned-rate-limited-`GenerationStatus` path (used by `generate_*`)
+  is unchanged — this is a backward-compatible addition (issue #1319).
+- New public exception types for the note and mind-map domains, mirroring the
+  existing `SourceError` / `SourceNotFoundError` shape: `NoteError` +
+  `NoteNotFoundError` and `MindMapError` + `MindMapNotFoundError`. Each
+  `*NotFoundError` is a triple-base `(NotFoundError, RPCError, <Domain>Error)`,
+  so it is catchable via the cross-domain `NotFoundError` umbrella, at
+  transport-level `except RPCError` call sites, and at domain-level
+  `except NoteError` / `except MindMapError` call sites. These are the
+  prerequisite for the mind-map not-found work (ADR-0019; issues #1291, #1346).
+  `MindMapNotFoundError` is now raised by the `mind_maps` mutation paths (see
+  *Changed* below); `NoteNotFoundError` is not raised by any method yet.
+- `ResearchStatus.NOT_FOUND` — a typed lifecycle sentinel for the
+  poll-observed absence of a *specific* requested research task, distinct from
+  `NO_RESEARCH` ("nothing in flight"). `research.poll(notebook_id, task_id=...)`
+  now returns `ResearchTask.not_found(task_id)` (status `NOT_FOUND`, carrying
+  the requested id) when a non-empty pinned `task_id` matches no in-flight task;
+  the unfiltered `task_id=None` empty poll still returns `NO_RESEARCH`
+  unchanged. Additive and non-breaking — the poll never raises for an absent
+  task (ADR-0019 Rule 4; issues #1344, #1346).
 - **Typed return values for the research / mind-map / source-guide methods.**
   `research.poll` / `research.start` / `research.wait_for_completion`,
   `artifacts.generate_mind_map`, and `sources.get_guide` now return typed
@@ -279,6 +820,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed / Deprecated
 
+- `ArtifactTimeoutError` now declares its bases umbrella-first
+  (`WaitTimeoutError, ArtifactError`), matching `SourceTimeoutError` and
+  `ResearchTimeoutError`. This is a cosmetic reorder with no behavior change:
+  `isinstance`/`except` against either base is unaffected.
+- `client.mind_maps` mutation sites now raise `MindMapNotFoundError` instead of
+  a bare `ValueError` on a missing target, so callers can `except NotFoundError`
+  (or `except MindMapError`) uniformly across namespaces. `rename` (and the
+  underlying note-backed `rename_mind_map`) raise it; `MindMapNotFoundError`
+  multi-inherits `ValueError`'s sibling `NotFoundError`, **not** `ValueError`
+  itself, so existing `except ValueError` rename callers must switch to
+  `except NotFoundError` / `except MindMapNotFoundError`. `delete(kind=None)` is
+  now **idempotent** — deleting an already-absent mind map returns `None` rather
+  than raising (matching `sources`/`artifacts`/`notes` delete, and the
+  `kind`-supplied path). `get_tree` returns `None` for a missing mind map (it is
+  a derived read that does not police parent existence) — previously `kind=None`
+  raised on an unknown id. Shape-drift in the interactive payload still raises
+  `UnknownRPCMethodError` (ADR-0019; issues #1291, #1346).
+- `client.mind_maps.generate(kind=MindMapKind.INTERACTIVE)` now raises
+  `ArtifactFeatureUnavailableError` (instead of a bare `ArtifactError`) when the
+  `CREATE_ARTIFACT` call returns no artifact id — no generation task was
+  created. **Non-breaking for `except ArtifactError`**:
+  `ArtifactFeatureUnavailableError` is a subclass of `ArtifactError`, so that
+  catch still works. (It also multi-inherits `RPCError`, so a handler that does
+  `except RPCError` *before* `except ArtifactError` will now take the `RPCError`
+  branch — the same MRO the sibling `generate_*` / `retry_failed` null-create
+  paths already produce.) This aligns the interactive async kickoff with that
+  sibling null-create contract (ADR-0019 "async kickoff"; issue #1359).
+- Documented two pre-existing `client.mind_maps` read semantics (docs-only, no
+  behavior change): `list()` populates `MindMap.tree` only for note-backed
+  entries — interactive entries carry `tree=None` ("not fetched", not "empty";
+  call `get_tree(..., kind=MindMapKind.INTERACTIVE)` to fetch one); and the explicit
+  `get_tree(..., kind=MindMapKind.INTERACTIVE)` path delegates absence detection to the RPC,
+  so a missing id's value is server-dependent (returns `None` today) rather than
+  enforced client-side (issues #1355, #1359).
 - **`ResearchAPI.wait_for_completion(interval=...)` → `initial_interval=...`.**
   The research waiter's poll-cadence keyword is now `initial_interval`,
   matching `SourcesAPI.wait_until_ready` and
@@ -299,6 +874,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Deprecated
 
+> Every deprecation below is on a compatibility runway to **v0.8.0**. The
+> consolidated [Upgrading to v0.8.0](docs/upgrading-to-0.8.0.md) guide is the
+> single reference for moving your code across the boundary; set
+> `NOTEBOOKLM_FUTURE_ERRORS=1` to exercise the v0.8.0 behavior in your tests
+> today.
+
+- **`client.mind_maps.get()` returning `None` for a missing mind map is now
+  deprecated**, closing the runway gap that left `mind_maps` as the only
+  #1247-cohort namespace without one. It now emits a `DeprecationWarning` on a
+  miss while **still returning `None`** (behavior unchanged this release),
+  matching `sources.get()` / `artifacts.get()` / `notes.get()`. In **v0.8.0** it
+  will instead **raise** `MindMapNotFoundError`. Use `get_or_none()` for the
+  sanctioned optional lookup (it stays silent), or migrate the `None`-check to a
+  `try/except MindMapNotFoundError`. The warning fires only on a miss; suppress
+  it with `NOTEBOOKLM_QUIET_DEPRECATIONS=1`. Tracking issue: #1247 (gap: #1358).
+  See [`docs/deprecations.md`](docs/deprecations.md).
 - **`sources.get()` / `artifacts.get()` / `notes.get()` returning `None` for a
   missing entity is deprecated.** These three methods now emit a
   `DeprecationWarning` on a miss while **still returning `None`** (behavior is
@@ -342,6 +933,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CLI now emits the `NOT_FOUND` error envelope for the `*NotFoundError`
+  family from the centralized handler, instead of the generic
+  `NOTEBOOKLM_ERROR`.** Any `NotebookNotFoundError` / `SourceNotFoundError` /
+  `ArtifactNotFoundError` / `NoteNotFoundError` / `MindMapNotFoundError` that
+  reaches `cli/error_handler.py` (e.g. `notebooks.get()` on a missing notebook,
+  or a `rename` whose target was deleted mid-operation) now exits `1` with the
+  typed `{"error": true, "code": "NOT_FOUND", ...}` JSON envelope carrying the
+  missing resource id — matching the per-command `source` / `artifact` /
+  `note get` convention (the documented CLI not-found contract since v0.5.0).
+  The per-command `get` paths already used `get_or_none` and are unaffected.
+  This also makes the `NOTEBOOKLM_FUTURE_ERRORS=1` preview faithful at the CLI
+  boundary, pre-positioning it for the v0.8.0 `get()` → raise / mutate-existing
+  fail-loud flips (issues #1364, #1247, #1362).
 - **`Source.from_api_response` now reports the real processing `status`.** The
   `ADD_SOURCE` / rename parsing path previously never read the status block and
   always fell back to `SourceStatus.READY`, while `client.sources.list()` /
@@ -412,19 +1016,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > to the `RPCError` parent), matching the `NotebookNotFoundError` signature.
 > All positional call sites remain source-compatible.
 
-- **`notebooklm source stale <ID>` now follows the standard CLI exit-code convention by default.** Exit `0` indicates the freshness check succeeded (regardless of whether the source is fresh or stale); exit `1` indicates an error. Previously the command used an inverted predicate (`0` = stale, `1` = fresh) so the shell idiom `if notebooklm source stale ID; then refresh; fi` worked naturally. **Migration:** scripts that depended on the inverted predicate can opt back into the legacy semantics with the new `--exit-on-stale` flag (`if notebooklm source stale --exit-on-stale ID; then refresh; fi`). Scripts written for the new default should branch on the JSON `stale`/`fresh` fields or stdout text. See [`docs/cli-exit-codes.md`](docs/cli-exit-codes.md#notebooklm-source-stale-source_id--opt-in-inverted-predicate) for the full rationale + the new `Exit code semantics` summary.
+- **`notebooklm source stale <ID>` now follows the standard CLI exit-code convention by default.** Exit `0` indicates the freshness check succeeded (regardless of whether the source is fresh or stale); exit `1` indicates an error. Previously the command used an inverted predicate (`0` = stale, `1` = fresh) so the shell idiom `if notebooklm source stale ID; then refresh; fi` worked naturally. **Migration:** scripts that depended on the inverted predicate can opt back into the legacy semantics with the new `--exit-on-stale` flag (`if notebooklm source stale --exit-on-stale ID; then refresh; fi`). Scripts written for the new default should branch on the JSON `stale`/`fresh` fields or stdout text. See [`docs/cli-exit-codes.md`](docs/cli-exit-codes.md#source-stale-exit-on-stale) for the full rationale + the new `Exit code semantics` summary.
 - **`NotebookLMClient.rpc_call(...)` no longer accepts `source_path`, `_is_retry`, or `operation_variant`** — the three kwargs deprecated in v0.5.0 (`docs/deprecations.md`) were removed after one MINOR cycle. The public escape hatch's primary contract (`client.rpc_call(method, params)`) is unchanged and the default-shape call keeps working with no migration. Migration:
   - **Keyword callers**: drop the removed kwarg from the call. The previous default-shape behavior (`source_path="/"`, `_is_retry=False`, `operation_variant=None`) is now what every call gets unconditionally — `source_path` was a leaky internal seam, `_is_retry` was an internal retry-loop flag, and `operation_variant` is part of the mutating-RPC idempotency registry. Calls that genuinely needed a non-`"/"` `source_path` or a specific `operation_variant` were already on the wrong layer; build a typed method on a sub-client instead, or open an issue describing the workflow.
   - **Positional callers** (rare): the positional order of the remaining parameters is `(method, params, allow_null, *, disable_internal_retries=...)`, so a previously-positional `source_path` / `_is_retry` argument now binds to a different parameter slot. A pre-cut `client.rpc_call(method, params, "/", True)` (which passed `source_path="/"`, `allow_null=True`) becomes `client.rpc_call(method, params, allow_null=True)` after the cut — switch to keyword arguments for `allow_null` to avoid this footgun.
   - There is no public replacement for the removed internal-only kwargs (`_is_retry`, `operation_variant`); they were never part of the supported surface in the first place.
 - **`source add --url` rejects internal hosts by default (SSRF guard).** `localhost`, `127.0.0.1`, RFC-1918, and link-local URLs — and any non-`http(s)` scheme — are now refused before ingestion. **Migration:** pass the new `--allow-internal` flag to ingest an internal `http(s)` URL intentionally (the scheme allowlist still applies). Full detail in **Security** below ([#1114](https://github.com/teng-lin/notebooklm-py/pull/1114)).
 - **`source` CLI `--json` output shape changed.** `source get --json` now emits the bare kind value (`"type": "url"`) instead of the leaked Python enum repr (`"type": "SourceType.URL"`), and `source fulltext --json` emits a fixed `{source_id, title, kind, content, url, char_count}` payload instead of a raw `asdict(SourceFulltext)` dump. **Migration:** `--json` consumers parsing `source get`'s `type` field, or relying on extra `fulltext` keys, must update. Full detail in **Fixed** below ([#1129](https://github.com/teng-lin/notebooklm-py/pull/1129)).
-- **Post-parse CLI validation errors exit `1` (was `2`) and print a JSON envelope on stdout under `--json`.** For `download` flag conflicts, `generate` validation, `research wait --cited-only`, and `ask --new` + `--conversation-id`, a `--json` invocation now emits `{"error": true, "code": "VALIDATION_ERROR", ...}` on stdout and exits `1` instead of Click's stderr usage text + exit `2`. Text-mode behavior is unchanged. **Migration:** automation parsing these `--json` failures should branch on exit `1` + the JSON body. Full detail in **Changed** below (ADR-015; [#1112](https://github.com/teng-lin/notebooklm-py/pull/1112), [#1115](https://github.com/teng-lin/notebooklm-py/pull/1115), [#1117](https://github.com/teng-lin/notebooklm-py/pull/1117)).
+- **Post-parse CLI validation errors exit `1` (was `2`) and print a JSON envelope on stdout under `--json`.** For `download` flag conflicts, `generate` validation, `research wait --cited-only`, and `ask --new` + `--conversation-id`, a `--json` invocation now emits `{"error": true, "code": "VALIDATION_ERROR", ...}` on stdout and exits `1` instead of Click's stderr usage text + exit `2`. Text-mode behavior is unchanged. **Migration:** automation parsing these `--json` failures should branch on exit `1` + the JSON body. Full detail in **Changed** below (ADR-0015; [#1112](https://github.com/teng-lin/notebooklm-py/pull/1112), [#1115](https://github.com/teng-lin/notebooklm-py/pull/1115), [#1117](https://github.com/teng-lin/notebooklm-py/pull/1117)).
 
 ### Added
 
 - **`notebooklm source stale --exit-on-stale` flag** — opt-in back-compat for the legacy inverted-predicate exit codes (`0` = stale, `1` = fresh). The default behavior is now the standard CLI convention (see **Breaking changes** above); pass `--exit-on-stale` to keep `if notebooklm source stale --exit-on-stale ID; then refresh; fi` shell idioms working.
-- **`Exit code semantics` summary section in [`docs/cli-exit-codes.md`](docs/cli-exit-codes.md#exit-code-semantics).** A normative one-line table — `0` = succeeded as documented, `1` = failed or queried target not found, `2` = Click parser-time error — backing the convention every command obeys outside the documented intentional exceptions. Cross-references the existing tables and [ADR-015](docs/adr/0015-json-envelope-contract-for-post-parse-click-exceptions.md).
+- **`Exit code semantics` summary section in [`docs/cli-exit-codes.md`](docs/cli-exit-codes.md#exit-code-semantics).** A normative one-line table — `0` = succeeded as documented, `1` = failed or queried target not found, `2` = Click parser-time error — backing the convention every command obeys outside the documented intentional exceptions. Cross-references the existing tables and [ADR-0015](docs/adr/0015-json-envelope-contract-for-post-parse-click-exceptions.md).
 - **`NotFoundError` cross-domain umbrella exception.** Catch `NotFoundError` to handle any "resource not found" case across notebooks, sources, and artifacts in one `except` clause — replacing `except (NotebookNotFoundError, SourceNotFoundError, ArtifactNotFoundError):`. `NotebookNotFoundError`, `SourceNotFoundError`, and `ArtifactNotFoundError` all inherit from `NotFoundError`. The umbrella itself is additive; the asymmetric inheritance noted on its original introduction has been resolved in the same release — all three subclasses also mix in `RPCError` (see **Breaking changes** above for the `except`-ordering migration).
 - **`notebooklm notebook delete --json`** ([#1167](https://github.com/teng-lin/notebooklm-py/issues/1167)). `notebook delete` was the last delete command (and the only `list` / `create` / `metadata` sibling) without a JSON envelope — passing `--json` crashed with `No such option`. It now emits the typed success/cancel envelope, refuses to prompt in `--json` mode (requiring `--yes`, else a `VALIDATION_ERROR` envelope + exit `1`), and surfaces `context_cleared: true` when the deleted notebook was the active context ([#1193](https://github.com/teng-lin/notebooklm-py/pull/1193)).
 - **`notebooklm skill install --dry-run` / `--no-clobber` / `--force`** ([#1109](https://github.com/teng-lin/notebooklm-py/pull/1109)). Project-scope installs now classify each target as create / up-to-date / overwrite. A target that would be overwritten with *different* content exits `1` and lists the conflicts unless `--force` (overwrite) or `--no-clobber` (skip differing, still create missing) is passed; `--dry-run` previews intended writes without touching disk. Writes go through an atomic temp-file + `os.replace` so a crash can't leave a partial `SKILL.md`. User scope keeps the historical always-overwrite behavior (the new flags error when paired with `--scope user`).
@@ -435,7 +1039,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Media `--wait` default timeouts raised.** `generate audio --wait` now defaults to 1200 s ([#1140](https://github.com/teng-lin/notebooklm-py/pull/1140)) and the video / cinematic-video wait defaults were increased to match empirical generation durations ([#1088](https://github.com/teng-lin/notebooklm-py/pull/1088), [#1094](https://github.com/teng-lin/notebooklm-py/issues/1094)), so long generations no longer time out before the artifact is ready under default settings. `docs/` now documents the media wait budgets and the manual `artifact wait` recovery path.
 - **`notebooklm doctor` exits `1` when any check fails** ([#1160](https://github.com/teng-lin/notebooklm-py/issues/1160)). It previously built `status: "fail"` entries but always exited `0`, so CI health checks, `set -e` scripts, and monitoring probes read a broken install as green. Overall health is now computed from the final check states (after any `--fix`) and the process exits `1` if any check still fails (warnings stay non-fatal). The exit happens after the payload/table is emitted, so machine-readable `--json` output is unaffected; `doctor` profile JSON errors are also now wrapped in the typed envelope ([#1179](https://github.com/teng-lin/notebooklm-py/pull/1179), [#1146](https://github.com/teng-lin/notebooklm-py/pull/1146)).
-- **Post-parse CLI validation errors emit the typed JSON envelope under `--json`** ([ADR-015](docs/adr/0015-json-envelope-contract-for-post-parse-click-exceptions.md)). `download` flag conflicts (`--force` + `--no-clobber`, `--latest` + `--earliest`, `--all` + `--artifact`), `generate` validation (cinematic `--format` / `--style` conflicts, invalid `--language` / `NOTEBOOKLM_HL`), `research wait --cited-only` without `--import-all`, and `ask --new` + `--conversation-id` now route through `{"error": true, "code": "VALIDATION_ERROR", ...}` on stdout and exit `1` under `--json`, instead of Click's parser bypassing the envelope to exit `2` with usage text on stderr. Text-mode behavior (usage text, exit `2`) is unchanged. Flagged under **Breaking changes** above for `--json` automation ([#1112](https://github.com/teng-lin/notebooklm-py/pull/1112), [#1115](https://github.com/teng-lin/notebooklm-py/pull/1115), [#1117](https://github.com/teng-lin/notebooklm-py/pull/1117)).
+- **Post-parse CLI validation errors emit the typed JSON envelope under `--json`** ([ADR-0015](docs/adr/0015-json-envelope-contract-for-post-parse-click-exceptions.md)). `download` flag conflicts (`--force` + `--no-clobber`, `--latest` + `--earliest`, `--all` + `--artifact`), `generate` validation (cinematic `--format` / `--style` conflicts, invalid `--language` / `NOTEBOOKLM_HL`), `research wait --cited-only` without `--import-all`, and `ask --new` + `--conversation-id` now route through `{"error": true, "code": "VALIDATION_ERROR", ...}` on stdout and exit `1` under `--json`, instead of Click's parser bypassing the envelope to exit `2` with usage text on stderr. Text-mode behavior (usage text, exit `2`) is unchanged. Flagged under **Breaking changes** above for `--json` automation ([#1112](https://github.com/teng-lin/notebooklm-py/pull/1112), [#1115](https://github.com/teng-lin/notebooklm-py/pull/1115), [#1117](https://github.com/teng-lin/notebooklm-py/pull/1117)).
 
 ### Fixed
 
@@ -539,7 +1143,7 @@ Items that need attention when upgrading from 0.4.x. Full migration prose lives 
 - **Per-call upload timeouts on `sources.add_file` / `add_drive`** (#618). New `upload_timeout` / `chunk_timeout` keyword args for tuning large-file uploads against slow networks.
 - **`ResearchAPI.wait_for_completion(notebook_id, task_id=None, *, timeout=1800, interval=5)`** ([#970](https://github.com/teng-lin/notebooklm-py/pull/970)). Polls until research reaches a terminal state (`completed` / `failed`) or the timeout fires; passes through `task_id` on subsequent polls once the backend assigns one to prevent a later concurrent task from substituting its sources/report. Surfaces a new terminal `failed` status so wait loops no longer spin until timeout after the backend rejects a task.
 - **`notebooklm.artifacts.with_rate_limit_retry(callable, *, max_retries=3, ...)`** ([#969](https://github.com/teng-lin/notebooklm-py/pull/969)). Shared retry helper for the `client.artifacts.generate_*` family — catches generation-time `RateLimitError`, honors `retry_after`, and falls back to exponential backoff. Replaces the per-caller try/except/sleep boilerplate previously suggested in `docs/python-api.md`.
-- **`__all__` declared on `notebooklm.paths`, `notebooklm.migration`, and `notebooklm.notebooklm_cli`** ([#958](https://github.com/teng-lin/notebooklm-py/pull/958)). ADR-012 marks all three as public modules; `__all__` now pins the exported surface (12 names on `paths`, 3 on `migration`, `cli` + `main` on the CLI entry point) so `from notebooklm.paths import *` is well-defined and the public API compatibility audit can lock it.
+- **`__all__` declared on `notebooklm.paths`, `notebooklm.migration`, and `notebooklm.notebooklm_cli`** ([#958](https://github.com/teng-lin/notebooklm-py/pull/958)). ADR-0012 marks all three as public modules; `__all__` now pins the exported surface (12 names on `paths`, 3 on `migration`, `cli` + `main` on the CLI entry point) so `from notebooklm.paths import *` is well-defined and the public API compatibility audit can lock it.
 
 ### Changed
 - **Custom `--storage` downloads now use the selected auth file** ([#838](https://github.com/teng-lin/notebooklm-py/issues/838), [#888](https://github.com/teng-lin/notebooklm-py/pull/888)). `ArtifactDownloadService` previously snapshotted the session's storage path at construction time, so `--storage` overrides applied after construction were silently ignored on download. CLI `--storage` flag and mid-process profile switches are now inherited reliably.
@@ -1034,7 +1638,8 @@ This is the initial public release of `notebooklm-py`. While core functionality 
 - **Authentication expiry**: CSRF tokens expire after some time. Re-run `notebooklm login` if you encounter auth errors.
 - **Large file uploads**: Files over 50MB may fail or timeout. Split large documents if needed.
 
-[Unreleased]: https://github.com/teng-lin/notebooklm-py/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/teng-lin/notebooklm-py/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/teng-lin/notebooklm-py/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/teng-lin/notebooklm-py/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/teng-lin/notebooklm-py/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/teng-lin/notebooklm-py/compare/v0.4.1...v0.5.0

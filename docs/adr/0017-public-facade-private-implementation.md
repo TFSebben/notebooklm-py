@@ -1,4 +1,4 @@
-# ADR-017: Public-facade / private-implementation re-export convention
+# ADR-0017: Public-facade / private-implementation re-export convention
 
 ## Status
 
@@ -9,19 +9,19 @@ Accepted (retroactive).
 `notebooklm-py` exposes a public Python API that downstream callers import and
 depend on. Internally, the implementation is decomposed into many small,
 underscore-prefixed modules — the underscore-prefix privacy policy is recorded
-in [ADR-012](0012-implementation-surface-convention.md), and the runtime
+in [ADR-0012](0012-implementation-surface-convention.md), and the runtime
 decomposition into narrow collaborators in
-[ADR-013](0013-composable-session-capabilities.md) /
-[ADR-014](0014-feature-local-runtime-adapters.md). These goals pull against
+[ADR-0013](0013-composable-session-capabilities.md) /
+[ADR-0014](0014-feature-local-runtime-adapters.md). These goals pull against
 each other:
 
-- Private modules are split, renamed, and merged frequently. The `CLAUDE.md`
-  file table records dozens of such moves (for example `_session_contracts.py`
-  → `_runtime_contracts.py`).
+- Private modules are split, renamed, and merged frequently. The current
+  module map in `docs/architecture.md` records moves such as the old
+  `_session_contracts.py` home becoming `_runtime/contracts.py`.
 - Public import paths must stay stable: a renamed module that a caller imported
   from is a breaking change.
 
-ADR-012 establishes *that* a module is private (the leading underscore). It
+ADR-0012 establishes *that* a module is private (the leading underscore). It
 does not, on its own, say how a public symbol whose implementation lives in a
 private module is exposed. Without a paired convention, either the public
 surface ossifies the internal layout (blocking refactors) or a refactor
@@ -31,8 +31,8 @@ The codebase already resolves this with a consistent pattern, but it is
 undocumented as a decision: short public modules that re-export from one or
 more underscore-prefixed implementation modules. `auth.py` is the most
 developed example — its body is almost pure re-exports forwarding to the
-`_auth/` package (see [ADR-003](0003-auth-facade-write-through.md) and the
-`auth.py` row in `CLAUDE.md`).
+`_auth/` package (see [ADR-0003](0003-auth-facade-write-through.md) and the
+`auth.py` row in `docs/architecture.md`).
 
 ## Decision
 
@@ -60,9 +60,11 @@ collaborators.
 
 The rules:
 
-1. **Public modules are facades.** A public module's body is re-exports (with
-   at most a thin binding, e.g. `auth.enumerate_accounts`). Logic lives in the
-   private implementation.
+1. **Public modules are facades where practical.** A public module's body is
+   usually re-exports (with at most a thin binding, e.g.
+   `auth.enumerate_accounts`). Small public helper modules such as
+   `artifacts.py`, `utils.py`, and `migration.py` may contain public helper
+   logic directly when that is the stable API.
 2. **Callers import from the facade.** Importing from an underscore-prefixed
    module is unsupported and may break without notice.
 3. **Private modules may move freely.** Splitting, renaming, or merging a
@@ -72,13 +74,13 @@ The rules:
    re-exported by a public facade *is* a breaking change; it is gated by the
    API-compat allowlist (`scripts/audit_public_api_compat.py` /
    `scripts/api-compat-allowlist.json`) and follows the deprecation strategy in
-   [ADR-018](0018-deprecation-strategy.md).
+   [ADR-0018](0018-deprecation-strategy.md).
 
 ## Consequences
 
 **Wanted**
 
-- **Refactor freedom**: internal decomposition (ADR-012/013/014) proceeds
+- **Refactor freedom**: internal decomposition (ADR-0012/013/014) proceeds
   without churning the public API.
 - **One obvious import path**: callers have a single stable location per
   concept, documented in `docs/python-api.md`.
@@ -91,20 +93,22 @@ The rules:
 - **Indirection**: reading a public module rarely shows the logic; you must
   follow the re-export into the private module.
 - **Drift risk**: a facade can fall out of sync with its implementation if a
-  symbol is added privately but not re-exported. The public-API tests and the
-  `CLAUDE.md` file table are the guardrails against this.
+  symbol is added privately but not re-exported. The public API compatibility
+  audit (`scripts/audit_public_api_compat.py --check-stale`) and public-surface
+  guardrails are the compatibility checks; `docs/architecture.md` is the
+  human-readable module map.
 - **Two names for one thing**: every facade ↔ implementation pair is a small
-  bookkeeping cost in the `CLAUDE.md` file table whenever a private module
+  bookkeeping cost in the architecture/module map whenever a private module
   moves.
 
 ## Alternatives considered
 
 - **Expose the underscore modules directly and let callers import them.**
   Rejected. It couples every caller to the internal layout; the frequent
-  private-module renames recorded in `CLAUDE.md` would each become a breaking
+  private-module renames recorded in `docs/architecture.md` would each become a breaking
   change.
 - **One flat public module that contains the implementation.** Rejected. It
-  forfeits the decomposition benefits of ADR-013/014 (narrow, testable
+  forfeits the decomposition benefits of ADR-0013/014 (narrow, testable
   collaborators) and re-creates the god-module the runtime arc dismantled.
 - **No convention — decide ad hoc per symbol.** Rejected. Inconsistency is
   exactly what makes the public surface hard to audit mechanically; a single

@@ -35,12 +35,33 @@
 
 📥 **Downloads & Export** - Download all generated artifacts locally (MP3, MP4, PDF, PNG, CSV, JSON, Markdown). Export to Google Docs/Sheets. **Features the web UI doesn't offer**: batch downloads, quiz/flashcard export in multiple formats, mind map JSON extraction.
 
-## Three Ways to Use
+## Use Cases & Recipes
+
+NotebookLM is a **grounded** engine: Gemini does the heavy reading and answers from *your* sources with citations. The winning pattern is to let it do the expensive analysis while your agent (Claude Code, Codex, …) orchestrates and handles the final mile. Recipes people build on top of this library:
+
+- **🪙 Zero-token research offload** — Throw 30 documents into a notebook, let Gemini do the heavy analysis, and have your agent spend tokens only on the final polish. The agent just orchestrates (`create` → `source add` → `ask`); the reasoning happens server-side.
+- **🧠 Web research → expert agent** — Run [Deep Research](docs/cli-reference.md#source-add-research) (`source add-research`) to scan the web into a sourced report, then distill that report into a reusable Claude skill — a packaged domain expert without hand-curating sources.
+- **💾 Persistent cross-session memory** — Keep a "Master Brain" notebook; a wrap-up step appends each session's decisions and fixes as notes (`note create` / `ask --save-as-note`), and a line in your `CLAUDE.md` queries it (`ask`) at the start of the next session. Storage and recall live on Google's infrastructure.
+- **🕸️ Obsidian / knowledge-graph sync** — Run the CLI from your vault root so downloaded artifacts (reports, mind-map JSON, transcripts) land as files in your knowledge graph; community skills built on this library even resolve NotebookLM's citation markers into Obsidian `[[wikilinks]]`. Pair with a podcast overview for an audio digest of your notes.
+- **🔁 Multi-format content repurposing** — One source set, every format: `generate audio` (podcast), `generate video`, `generate slide-deck`, plus a `generate report` blog draft, `generate quiz`, and `generate flashcards` — fan a single notebook out across channels.
+- **📞 Grounded knowledge base (RAG)** — Load product docs, FAQs, RFCs, and past tickets, then `ask --json` for **source-grounded, cited** answers for support, on-call, or internal Q&A.
+- **🧩 Grounded memory for coding agents** — Expose a notebook of your internal docs/RFCs/architecture over the [MCP server](docs/mcp-guide.md) (or plain `ask`) so an agent answers from *your* code with citations rather than plausible-sounding guesses — a zero-infra alternative to standing up your own vector DB and embedding pipeline.
+- **🚨 Incident runbook generator** — On an alert, spin up a notebook of the relevant docs, ask targeted diagnostic questions, and emit a briefing-doc report (`generate report --format briefing-doc`) as an automated runbook.
+- **📚 Curriculum / study-set builder** — Scrape a syllabus or developer roadmap, create one notebook per topic (with deliberate pacing to dodge rate limits), and bulk-generate podcasts, quizzes, and flashcards for each.
+- **📰 Scheduled audio briefings** — Pair `auth refresh --quiet` (cron/launchd/systemd) with `generate audio` to publish a fresh personalized briefing to a podcast feed on a schedule.
+
+These combine ordinary library primitives — see the [CLI Reference](docs/cli-reference.md) and [Python API](docs/python-api.md). The agent-side glue (skills, scheduling, vault layout) lives in your own setup, not this package.
+
+**Seen in the wild:** ["Claude Code + NotebookLM = CHEAT CODE"](https://www.youtube.com/watch?v=usTeU4Uh0iM) · ["…+ Obsidian = GOD MODE"](https://www.youtube.com/watch?v=kU3qYQ7ACMA) · [giving Claude Code "a brain that doesn't hallucinate"](https://dev.to/stevengonsalvez/notebooklm-skills-give-claude-code-a-brain-that-doesnt-hallucinate-2anj) · [auto-building study notebooks from roadmap.sh](https://dev.to/waseemaldmeiri/automating-roadmapsh-into-notebooklm-132i) · [a browser-free YouTube→notebook→cited-answers pipeline driven entirely from the terminal](https://artemxtech.substack.com/p/notebooklm-has-a-knowledge-graph).
+
+## Ways to Use
 
 | Method | Best For |
 |--------|----------|
 | **Python API** | Application integration, async workflows, custom pipelines |
 | **CLI** | Shell scripts, quick tasks, CI/CD automation |
+| **MCP Server** | Exposing NotebookLM tools to Claude Desktop/Code, Cursor, Windsurf, and other MCP clients |
+| **REST Server** | Local automation over guarded HTTP routes without spawning a CLI process per call |
 | **Agent Integration** | Claude Code, Codex, LLM agents, natural language automation |
 
 ## Features
@@ -52,6 +73,8 @@
 | **Notebooks** | Create, list, rename, delete |
 | **Sources** | URLs, YouTube, files (PDF, text, Markdown, Word, EPUB, audio, video, images), Google Drive, pasted text; refresh, get guide/fulltext |
 | **Chat** | Questions, conversation history, custom personas |
+| **Notes** | Create, list, rename, delete, save chat answers, save conversation history |
+| **Source Labels** | AI-generated or manual topic labels; add/remove source membership; filter sources by label |
 | **Research** | Web and Drive research agents (fast/deep modes) with auto-import |
 | **Sharing** | Public/private links, user permissions (viewer/editor), view level control |
 
@@ -67,7 +90,7 @@
 | **Flashcards** | Configurable quantity and difficulty | JSON, Markdown, HTML |
 | **Report** | Briefing doc, study guide, blog post, or custom prompt | Markdown |
 | **Data Table** | Custom structure via natural language | CSV |
-| **Mind Map** | Interactive hierarchical visualization | JSON |
+| **Mind Map** | Hierarchical node tree — **two kinds**: note-backed JSON or the newer interactive studio map (`--kind` / `MindMapKind`) | JSON |
 
 ### Beyond the Web UI
 
@@ -90,19 +113,27 @@ These features are available via API/CLI but not exposed in NotebookLM's web int
 
 The full install guide — six personas (agent, end-user, library, headless, contributor, power-user), optional extras matrix, platform notes — lives in **[docs/installation.md](docs/installation.md)**.
 
-**Quickest start** (CLI users and AI agents):
+**Quickest start** (CLI users and AI agents) — install the CLI with `uv tool` (recommended) or `pipx`:
 
 ```bash
-pip install "notebooklm-py[browser]"   # core + Playwright
-playwright install chromium             # ~170 MB; no progress bar — be patient (30–90 s)
-notebooklm login                        # opens browser for Google sign-in
-notebooklm auth check --test --json     # verify: expect "status": "ok"
+uv tool install "notebooklm-py[browser]"   # or: pipx install "notebooklm-py[browser]"
+notebooklm login                           # first run auto-downloads Chromium (~170 MB), then Google sign-in
+notebooklm auth check --test --json        # verify: expect "status": "ok"
+```
+
+**Why `uv tool` / `pipx`?** They install the CLI into its own isolated environment and put `notebooklm` on your `PATH` — no dependency clashes with other tools, a one-line upgrade (`uv tool upgrade notebooklm-py`) or uninstall, and, crucially, they work on modern macOS (Homebrew Python) and Debian/Ubuntu where a system-wide `pip install` is blocked with `error: externally-managed-environment` ([PEP 668](https://peps.python.org/pep-0668/)). No `uv` yet? `curl -LsSf https://astral.sh/uv/install.sh | sh` (or `brew install uv` / `winget install astral-sh.uv`).
+
+**Prefer plain `pip`?** It works the same **inside a virtualenv** (and directly on Windows, where Python isn't externally-managed):
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install "notebooklm-py[browser]"
 ```
 
 **As a library** (embedded in your app — no Playwright, no Chromium):
 
 ```bash
-pip install notebooklm-py               # ~10 MB; ship a pre-acquired storage_state.json
+uv add notebooklm-py                    # or, inside a virtualenv: pip install notebooklm-py
 ```
 
 If `playwright install chromium` fails on Linux with `TypeError: onExit is not a function`, see the [Linux workaround](docs/troubleshooting.md#linux). **Contributors:** see [CONTRIBUTING.md](CONTRIBUTING.md).
@@ -147,7 +178,7 @@ notebooklm generate quiz --difficulty hard
 notebooklm generate flashcards --quantity more
 notebooklm generate slide-deck
 notebooklm generate infographic --orientation portrait
-notebooklm generate mind-map
+notebooklm generate mind-map                       # interactive studio map (default); --kind note-backed for the JSON tree
 notebooklm generate data-table "compare key concepts"
 
 # 5. Download artifacts
@@ -186,7 +217,7 @@ Use `--prompt-file PATH` with `ask`, prompt-based `generate` commands, and `sour
 
 ```python
 import asyncio
-from notebooklm import NotebookLMClient
+from notebooklm import NotebookLMClient, MindMapKind
 
 async def main():
     async with NotebookLMClient.from_storage() as client:
@@ -208,8 +239,10 @@ async def main():
         await client.artifacts.wait_for_completion(nb.id, status.task_id)
         await client.artifacts.download_quiz(nb.id, "quiz.json", output_format="json")
 
-        # Generate mind map and export
-        result = await client.artifacts.generate_mind_map(nb.id)
+        # Generate a mind map via the unified client.mind_maps API (issue #1256) —
+        # two kinds: the newer MindMapKind.INTERACTIVE studio map (shown; polled to
+        # completion by default) or MindMapKind.NOTE_BACKED JSON. Both export via:
+        await client.mind_maps.generate(nb.id, kind=MindMapKind.INTERACTIVE)
         await client.artifacts.download_mind_map(nb.id, "mindmap.json")
 
 asyncio.run(main())
@@ -238,6 +271,8 @@ Fetches the canonical [SKILL.md](SKILL.md) directly from GitHub.
 
 - **[CLI Reference](docs/cli-reference.md)** - Complete command documentation
 - **[Python API](docs/python-api.md)** - Full API reference
+- **[MCP Guide](docs/mcp-guide.md)** - MCP server setup, transports, and tool reference
+- **[REST API Server](docs/installation.md#rest-api-server)** - Experimental localhost FastAPI server
 - **[Configuration](docs/configuration.md)** - Storage and settings
 - **[Release Guide](docs/releasing.md)** - Release checklist and packaging verification
 - **[Troubleshooting](docs/troubleshooting.md)** - Common issues and solutions

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Final
+from typing import Any
 
 from ..rpc import (
     INTERACTIVE_MIND_MAP_VARIANT,
@@ -54,6 +54,23 @@ _STATIC_REPORT_CONFIGS: dict[ReportFormat, dict[str, str]] = {
 }
 
 
+def _artifact_client_options() -> list[Any]:
+    """Return the client-options block used by Studio artifact RPCs.
+
+    Live UI captures on 2026-06-15 for Data Table and interactive Mind Map send
+    this full capability envelope as ``CREATE_ARTIFACT`` param 0. Older captures
+    used the shorter ``[2]`` form, but the fuller envelope now matches the web
+    client and the in-place retry RPC.
+    """
+    return [
+        2,
+        None,
+        None,
+        [1, None, None, None, None, None, None, None, None, None, [1]],
+        [[1, 4, 8, 2, 3, 6]],
+    ]
+
+
 def build_audio_artifact_params(
     notebook_id: str,
     source_ids: list[str],
@@ -71,7 +88,7 @@ def build_audio_artifact_params(
     length_code = audio_length.value if audio_length is not None else AudioLength.DEFAULT.value
 
     return [
-        [2],
+        _artifact_client_options(),
         notebook_id,
         [
             None,
@@ -111,7 +128,12 @@ def build_video_artifact_params(
     source_ids_double = nest_source_ids(source_ids, 1)
 
     format_code = video_format.value if video_format is not None else VideoFormat.EXPLAINER.value
-    style_code = video_style.value if video_style is not None else VideoStyle.AUTO_SELECT.value
+    if video_style == VideoStyle.CUSTOM:
+        # Live Web UI serializes the CUSTOM enum's proto-default value (0) as
+        # an omitted/null field and carries the custom visual prompt in slot 6.
+        style_code = None
+    else:
+        style_code = video_style.value if video_style is not None else VideoStyle.AUTO_SELECT.value
 
     video_config = [
         source_ids_double,
@@ -121,11 +143,11 @@ def build_video_artifact_params(
         format_code,
         style_code,
     ]
-    if style_prompt:
+    if video_style == VideoStyle.CUSTOM and style_prompt:
         video_config.append(style_prompt)
 
     return [
-        [2],
+        _artifact_client_options(),
         notebook_id,
         [
             None,
@@ -157,7 +179,7 @@ def build_cinematic_video_artifact_params(
     source_ids_double = nest_source_ids(source_ids, 1)
 
     return [
-        [2],
+        _artifact_client_options(),
         notebook_id,
         [
             None,
@@ -201,7 +223,7 @@ def build_report_artifact_params(
     source_ids_double = nest_source_ids(source_ids, 1)
 
     return [
-        [2],
+        _artifact_client_options(),
         notebook_id,
         [
             None,
@@ -242,7 +264,7 @@ def build_quiz_artifact_params(
     difficulty_code = difficulty.value if difficulty is not None else QuizDifficulty.MEDIUM.value
 
     return [
-        [2],
+        _artifact_client_options(),
         notebook_id,
         [
             None,
@@ -285,7 +307,7 @@ def build_flashcards_artifact_params(
     difficulty_code = difficulty.value if difficulty is not None else QuizDifficulty.MEDIUM.value
 
     return [
-        [2],
+        _artifact_client_options(),
         notebook_id,
         [
             None,
@@ -316,6 +338,8 @@ def build_flashcards_artifact_params(
 def build_interactive_mind_map_artifact_params(
     notebook_id: str,
     source_ids: list[str],
+    *,
+    instructions: str | None = None,
 ) -> list[Any]:
     """Build ``CREATE_ARTIFACT`` params for the interactive mind map.
 
@@ -324,10 +348,25 @@ def build_interactive_mind_map_artifact_params(
     from the note-backed mind map built by :func:`build_mind_map_params`
     (which uses ``GENERATE_MIND_MAP``). Shape verified live against the
     captured GUI ``CREATE_ARTIFACT`` request (issue #1256).
+
+    The options block mirrors quiz/flashcards: the variant sits at
+    ``[9][1][0]`` and the free-text generation prompt at ``[9][1][2]``. The
+    server honours that prompt for variant 4 too (verified live — it steers the
+    generated tree), so ``instructions`` is emitted into that slot when a
+    non-empty prompt is given. When it is ``None`` (or empty / whitespace-only)
+    the bare ``[variant]`` options list is kept, so the default no-prompt
+    request stays byte-identical to the original shape.
     """
     source_ids_triple = nest_source_ids(source_ids, 2)
+    options: list[Any] = [INTERACTIVE_MIND_MAP_VARIANT]
+    if instructions and instructions.strip():
+        # Match the quiz/flashcards layout: prompt at index 2 of the options
+        # list. Empty / whitespace-only instructions are treated as no prompt so
+        # the request stays byte-identical to the bare ``[variant]`` shape (and a
+        # blank prompt is never sent to the server).
+        options = [INTERACTIVE_MIND_MAP_VARIANT, None, instructions]
     return [
-        [2],
+        _artifact_client_options(),
         notebook_id,
         [
             None,
@@ -339,7 +378,7 @@ def build_interactive_mind_map_artifact_params(
             None,
             None,
             None,
-            [None, [INTERACTIVE_MIND_MAP_VARIANT]],
+            [None, options],
         ],
     ]
 
@@ -365,7 +404,7 @@ def build_infographic_artifact_params(
     style_code = style.value if style is not None else InfographicStyle.AUTO_SELECT.value
 
     return [
-        [2],
+        _artifact_client_options(),
         notebook_id,
         [
             None,
@@ -404,7 +443,7 @@ def build_slide_deck_artifact_params(
     length_code = slide_length.value if slide_length is not None else SlideDeckLength.DEFAULT.value
 
     return [
-        [2],
+        _artifact_client_options(),
         notebook_id,
         [
             None,
@@ -437,24 +476,9 @@ def build_revise_slide_params(artifact_id: str, slide_index: int, prompt: str) -
     ]
 
 
-# Fixed client capability blob for ``RETRY_ARTIFACT``. Confirmed byte-identical
-# across video (UI DevTools capture), audio, and infographic retries
-# (issue #1319), so it is sent verbatim regardless of artifact type. The
-# trailing ``[[1, 4, 8, 2, 3, 6]]`` is a static artifact-type-code capability
-# list, not artifact-specific. If Google reshapes this, the RETRY_ARTIFACT call
-# fails loudly per the standard RPC policy rather than silently mis-retrying.
-_RETRY_OPTIONS: Final[list[Any]] = [
-    2,
-    None,
-    None,
-    [1, None, None, None, None, None, None, None, None, None, [1]],
-    [[1, 4, 8, 2, 3, 6]],
-]
-
-
 def build_retry_artifact_params(artifact_id: str) -> list[Any]:
     """Build ``RETRY_ARTIFACT`` params for an in-place failed-artifact retry."""
-    return [_RETRY_OPTIONS, artifact_id]
+    return [_artifact_client_options(), artifact_id]
 
 
 def build_data_table_artifact_params(
@@ -468,7 +492,7 @@ def build_data_table_artifact_params(
     source_ids_triple = nest_source_ids(source_ids, 2)
 
     return [
-        [2],
+        _artifact_client_options(),
         notebook_id,
         [
             None,

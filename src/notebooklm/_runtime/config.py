@@ -15,6 +15,7 @@ from __future__ import annotations
 __all__ = [
     "CORE_LOGGER_NAME",
     "DEFAULT_CONNECT_TIMEOUT",
+    "DEFAULT_CHAT_TIMEOUT",
     "DEFAULT_KEEPALIVE_MIN_INTERVAL",
     "DEFAULT_MAX_CONCURRENT_RPCS",
     "DEFAULT_MAX_CONCURRENT_UPLOADS",
@@ -41,6 +42,11 @@ CORE_LOGGER_NAME = "notebooklm._core"
 # Default HTTP timeouts in seconds
 DEFAULT_TIMEOUT = 30.0
 DEFAULT_CONNECT_TIMEOUT = 10.0  # Connection establishment timeout
+# Chat uses a streamed endpoint whose shared-notebook path can spend tens of
+# seconds resolving access/source context before the first byte arrives. Keep
+# fast metadata RPCs on the 30s read window, but give chat enough first-byte
+# slack for the verified shared-notebook path.
+DEFAULT_CHAT_TIMEOUT = 180.0
 
 # Minimum keepalive interval to avoid accidentally rate-limiting accounts.google.com
 DEFAULT_KEEPALIVE_MIN_INTERVAL = 60.0
@@ -53,8 +59,8 @@ DEFAULT_KEEPALIVE_MIN_INTERVAL = 60.0
 # limit (``ulimit -n``).
 DEFAULT_MAX_CONCURRENT_UPLOADS = 4
 
-# Default ceiling on simultaneous in-flight ``_perform_authed_post``
-# RPC POSTs. Sits *below* the default httpx pool
+# Default ceiling on simultaneous in-flight
+# ``RuntimeTransport.perform_authed_post`` RPC POSTs. Sits *below* the default httpx pool
 # size (``ConnectionLimits.max_connections=100``) so short-lived helper
 # requests outside the RPC path — refresh GETs, resumable-upload
 # preflights — have pool headroom even when the RPC semaphore is

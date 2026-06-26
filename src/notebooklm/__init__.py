@@ -54,6 +54,7 @@ from .client import NotebookLMClient
 
 # Public API: Exceptions (centralized in exceptions.py)
 from .exceptions import (
+    AmbiguousResearchTaskError,  # Domain: Research
     # Domain: Artifacts
     ArtifactDownloadError,
     ArtifactError,
@@ -74,6 +75,9 @@ from .exceptions import (
     # Validation/Config
     ConfigurationError,
     DecodingError,
+    # Domain: Source labels
+    LabelError,
+    LabelNotFoundError,
     MindMapError,
     MindMapNotFoundError,
     # Network
@@ -91,7 +95,6 @@ from .exceptions import (
     # Cross-domain umbrellas
     NotFoundError,
     RateLimitError,
-    # Domain: Research
     ResearchError,
     ResearchTaskMismatchError,
     ResearchTimeoutError,
@@ -130,10 +133,12 @@ from .types import (
     ConversationTurn,
     DriveMimeType,
     ExportType,
+    GenerationState,
     GenerationStatus,
     InfographicDetail,
     InfographicOrientation,
     InfographicStyle,
+    Label,
     MindMap,
     MindMapKind,
     MindMapResult,
@@ -141,6 +146,7 @@ from .types import (
     Notebook,
     NotebookDescription,
     NotebookMetadata,
+    PromptSuggestion,
     QuizDifficulty,
     QuizQuantity,
     ReportFormat,
@@ -200,16 +206,19 @@ __all__ = [
     "SourceGuide",
     "SourceSummary",
     "Artifact",
+    "GenerationState",
     "GenerationStatus",
     "ReportSuggestion",
     "MindMap",
     "MindMapKind",
     "MindMapResult",
     "Note",
+    "Label",
     "ConversationTurn",
     "ChatReference",
     "AskResult",
     "ChatMode",
+    "PromptSuggestion",
     "CitedSourceSelection",
     "ResearchStatus",
     "ResearchSource",
@@ -263,6 +272,7 @@ __all__ = [
     "ArtifactPendingTimeoutError",
     "ArtifactInProgressTimeoutError",
     # Domain Exceptions: Research
+    "AmbiguousResearchTaskError",
     "ResearchError",
     "ResearchTimeoutError",
     "ResearchTaskMismatchError",
@@ -272,6 +282,9 @@ __all__ = [
     # Domain Exceptions: Mind maps
     "MindMapError",
     "MindMapNotFoundError",
+    # Domain Exceptions: Source labels
+    "LabelError",
+    "LabelNotFoundError",
     # Cross-domain umbrella: wait/poll timeouts
     "WaitTimeoutError",
     # Warnings

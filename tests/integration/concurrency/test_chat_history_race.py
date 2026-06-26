@@ -33,9 +33,9 @@ from urllib.parse import parse_qs, unquote, urlparse
 import httpx
 import pytest
 
-from _fixtures.kernel_test_helpers import install_http_client_for_test
 from notebooklm import NotebookLMClient
 from notebooklm.rpc import RPCMethod
+from tests._fixtures.kernel_test_helpers import install_http_client_for_test
 
 # Mock-only tests (no real HTTP, no cassette) — opt out of the
 # integration-tree enforcement hook in ``tests/integration/conftest.py``.
@@ -203,7 +203,7 @@ def _make_client(transport: httpx.AsyncBaseTransport, auth_tokens) -> NotebookLM
     """Build a ``NotebookLMClient`` wired to ``transport``.
 
     Mirrors ``test_idempotency_create._make_client_with_transport``: stub
-    ``_core._kernel.http_client`` with a pre-built ``AsyncClient`` so the chat
+    ``client._collaborators.kernel.http_client`` with a pre-built ``AsyncClient`` so the chat
     POSTs route through the mock instead of opening a real socket.
     """
     client = NotebookLMClient(auth_tokens)

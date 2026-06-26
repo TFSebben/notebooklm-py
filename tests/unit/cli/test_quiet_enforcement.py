@@ -18,7 +18,7 @@ The contract therefore is:
 This module enforces that contract structurally via an AST walk over every
 ``src/notebooklm/cli/**/*.py`` file except ``error_handler.py`` (which owns
 the quiet-bypassing error helpers themselves). The scan mirrors ``_cli_files()``
-in the sibling gate ``tests/_lint/test_error_handler_allowlist.py`` so the two
+in the sibling gate ``tests/_guardrails/test_error_handler_allowlist.py`` so the two
 CLI exit-path gates cover an identical file set -- including everything under
 ``cli/services/`` -- and a quiet-bypassing error-path call cannot hide in a
 non-``*_cmd.py`` module (issue #1301).
@@ -70,7 +70,7 @@ import ast
 from collections.abc import Iterator
 from pathlib import Path
 
-from _fixtures.cli_exit_markers import Span, marker_reasons, match_markers
+from tests._fixtures.cli_exit_markers import Span, marker_reasons, match_markers
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CLI_ROOT = REPO_ROOT / "src" / "notebooklm" / "cli"
@@ -173,7 +173,7 @@ def _cli_files() -> list[Path]:
     """Every ``cli/**/*.py`` except ``error_handler.py`` (which owns the helpers).
 
     Identical file set to ``_cli_files()`` in the sibling gate
-    ``tests/_lint/test_error_handler_allowlist.py`` so both CLI exit-path gates
+    ``tests/_guardrails/test_error_handler_allowlist.py`` so both CLI exit-path gates
     audit the same modules (issue #1301).
     """
     return [p for p in sorted(CLI_ROOT.rglob("*.py")) if p.name != "error_handler.py"]

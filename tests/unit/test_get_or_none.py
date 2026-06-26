@@ -1,6 +1,6 @@
 """Tests for the public ``get_or_none`` lookup across all five namespaces.
 
-ADR-019 (error-and-return contract) reserves ``None``-on-miss for an explicit
+ADR-0019 (error-and-return contract) reserves ``None``-on-miss for an explicit
 ``get_or_none`` while ``get`` raises on a miss (the raise-flip itself lands in
 v0.8.0, issue #1247). This module pins ``get_or_none`` for ``notebooks``,
 ``sources``, ``artifacts``, ``notes``, and ``mind_maps``: each returns the
@@ -8,7 +8,7 @@ object on a hit, ``None`` on a genuine miss, and re-raises (never swallows) a
 transport-level :class:`~notebooklm.exceptions.RPCError`.
 
 The :func:`~notebooklm._lookup.unwrap_or_raise` helper that backs the future
-``get``-raises wiring is covered directly here too (ADR-019 Enforcement
+``get``-raises wiring is covered directly here too (ADR-0019 Enforcement
 tier-2).
 """
 
@@ -60,10 +60,10 @@ class TestUnwrapOrRaise:
 
 
 def _make_notebooks_api(rpc_call: AsyncMock) -> NotebooksAPI:
-    # ADR-007: configure the rpc_call seam via constructor injection
+    # ADR-0007: configure the rpc_call seam via constructor injection
     # (``make_fake_core(rpc_call=...)``) rather than dotted AsyncMock attribute
     # assignment, which the forbidden-monkeypatch lint rejects.
-    from _fixtures.fake_core import make_fake_core
+    from tests._fixtures.fake_core import make_fake_core
 
     core = make_fake_core(rpc_call=rpc_call)
     return NotebooksAPI(core.rpc_executor, sources_api=MagicMock())
@@ -76,7 +76,7 @@ def sources_api():
 
 @pytest.fixture
 def artifacts_api():
-    from _fixtures.fake_core import make_fake_core
+    from tests._fixtures.fake_core import make_fake_core
 
     core = make_fake_core(rpc_call=AsyncMock(), get_source_ids=AsyncMock(return_value=[]))
     mind_maps = MagicMock(spec=NoteBackedMindMapService)
@@ -95,7 +95,7 @@ def artifacts_api():
 
 @pytest.fixture
 def notes_api():
-    from _fixtures.fake_core import make_fake_core
+    from tests._fixtures.fake_core import make_fake_core
 
     core = make_fake_core(rpc_call=AsyncMock())
     note_service = NoteService(core)
@@ -232,6 +232,21 @@ class TestNotesGetOrNone:
             warnings.simplefilter("error", DeprecationWarning)
             result = await notes_api.get_or_none("nb_1", "missing")
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_id_match_reads_through_note_row_adapter(self, notes_api):
+        """The id-slot comparison goes through ``NoteRow.id`` (#1485).
+
+        ``NoteRow.id`` stringifies the raw slot (the unified ``SourceRow.id``
+        convention), so a non-string wire id still matches its string form
+        instead of silently flipping a found note to not-found.
+        """
+        notes_api._get_all_notes_and_mind_maps = AsyncMock(
+            return_value=[[12345, ["12345", "Body", None, None, "Title"]]]
+        )
+        result = await notes_api.get_or_none("nb_1", "12345")
+        assert result is not None
+        assert result.id == "12345"
 
     @pytest.mark.asyncio
     async def test_propagates_rpc_error(self, notes_api):

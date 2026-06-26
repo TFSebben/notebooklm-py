@@ -19,14 +19,21 @@ except ImportError:
     pass  # python-dotenv not installed, rely on shell environment
 
 from notebooklm import NotebookLMClient
-from notebooklm.auth import AuthTokens, load_auth_from_storage
-from notebooklm.exceptions import ChatError
+
+# ``load_auth_from_storage`` was de-blessed from ``notebooklm.auth.__all__`` in
+# #1592 (still importable there for back-compat); first-party code — including
+# these e2e fixtures — imports it from its canonical ``_auth.tokens`` home.
+from notebooklm._auth.tokens import load_auth_from_storage
+from notebooklm.auth import AuthTokens
+from notebooklm.exceptions import ChatError, RateLimitError
 from notebooklm.paths import get_profile_dir
 
 # Substrings in ChatError / skip messages that mark a server-side rate-limit
 # or quota rejection rather than a client bug. Covers both the explicit
 # UserDisplayableError message and the HTTP-status-wrapped 429 path in
-# _chat/api.py:156, plus the generation skip phrase in assert_generation_started.
+# ``notebooklm._chat.transport.chat_aware_authed_post``, the generation skip
+# phrase in assert_generation_started, and the "Rate limit:" prefix
+# _install_generation_rate_limit_skip adds to typed RateLimitError skips.
 _RATE_LIMIT_PHRASES = (
     "rate limit",
     "rate limited",
@@ -53,6 +60,39 @@ def _install_chat_rate_limit_skip(client: NotebookLMClient) -> None:
             raise
 
     client.chat.ask = _ask_with_skip
+
+
+def _install_generation_rate_limit_skip(client: NotebookLMClient) -> None:
+    """Wrap ``client.artifacts.generate_*``/``revise_*`` so ``RateLimitError`` becomes a skip.
+
+    The RPC layer raises a typed ``RateLimitError`` when Google rejects
+    CREATE_ARTIFACT with a quota error (e.g. upstream status 8, Resource
+    exhausted) — before any ``GenerationStatus`` exists, so the
+    ``is_rate_limited`` skip in ``assert_generation_started`` never runs.
+    That is server-side throttling, not a client defect. Only the precise
+    typed ``RateLimitError`` skips; every other exception still raises so
+    real defects stay visible.
+    """
+
+    def _wrap(original):
+        async def _with_skip(*args, **kwargs):
+            try:
+                return await original(*args, **kwargs)
+            except RateLimitError as e:
+                # The "Rate limit:" prefix guarantees a _RATE_LIMIT_PHRASES
+                # match regardless of the exception message wording, so the
+                # skip always lands in pytest_terminal_summary's section.
+                pytest.skip(f"Rate limit: {e}")
+
+        return _with_skip
+
+    for name in dir(client.artifacts):
+        if not (name.startswith("generate_") or name.startswith("revise_")):
+            continue
+        original = getattr(client.artifacts, name)
+        if not callable(original):
+            continue
+        setattr(client.artifacts, name, _wrap(original))
 
 
 def _emit_auth_route_diagnostic(auth_tokens: AuthTokens) -> None:
@@ -356,6 +396,7 @@ def auth_tokens() -> AuthTokens:
 async def client(auth_tokens) -> AsyncGenerator[NotebookLMClient, None]:
     async with NotebookLMClient(auth_tokens, storage_path=auth_tokens.storage_path) as c:
         _install_chat_rate_limit_skip(c)
+        _install_generation_rate_limit_skip(c)
         yield c
 
 
@@ -370,7 +411,7 @@ def read_only_notebook_id():
     list, get, or query but do NOT modify the notebook. Do not use this
     fixture for tests that create, update, or delete resources.
 
-    See docs/contributing/testing.md for setup instructions.
+    See docs/development.md for setup instructions.
     """
     notebook_id = os.environ.get("NOTEBOOKLM_READ_ONLY_NOTEBOOK_ID")
     if not notebook_id:
@@ -383,7 +424,7 @@ def read_only_notebook_id():
             "  3. Generate some artifacts (audio, quiz, etc.)\n"
             "  4. Copy notebook ID from URL and run:\n"
             "     export NOTEBOOKLM_READ_ONLY_NOTEBOOK_ID='your-notebook-id'\n\n"
-            "See docs/contributing/testing.md for details.\n",
+            "See docs/development.md for details.\n",
             returncode=1,
         )
     return notebook_id

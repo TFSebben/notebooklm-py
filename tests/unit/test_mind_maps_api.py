@@ -29,7 +29,7 @@ def _pending_type4_artifact(artifact_id: str, title: str = "INT") -> Artifact:
 
 
 def _make_api(*, note_rows=None, interactive=None):
-    # ADR-007: configure the rpc_call seam via MagicMock(...) construction
+    # ADR-0007: configure the rpc_call seam via MagicMock(...) construction
     # keyword (and configure_mock(...) for per-test overrides below) rather
     # than dotted AsyncMock attribute assignment, which the forbidden-
     # monkeypatch lint rejects on the rpc_call seam.
@@ -63,6 +63,42 @@ async def test_list_unions_both_backings():
     assert by_id["note_mm"].tree == {"name": "NB", "children": []}
     assert by_id["int_mm"].kind == MindMapKind.INTERACTIVE
     assert by_id["int_mm"].tree is None  # interactive tree fetched lazily via get_tree
+
+
+@pytest.mark.asyncio
+async def test_list_note_backed_returns_only_note_backed_without_artifact_list():
+    """``list_note_backed`` decodes the note-backed rows ONLY, via a single RPC.
+
+    Even with an interactive map present, the result carries note-backed
+    entries exclusively (every ``kind`` is ``NOTE_BACKED``; the interactive id
+    never appears — the method never sees that backing), and ``artifacts.list``
+    is NOT consulted: the only fetch is the note-backed service's
+    ``list_mind_maps`` (the single ``GET_NOTES_AND_MIND_MAPS`` round-trip the
+    artifact-delete probe relies on for cassette stability).
+    """
+    api, _, mind_maps, artifacts, _ = _make_api(
+        note_rows=[["note_mm", '{"name": "NB", "children": []}']],
+        interactive=[_interactive_artifact("int_mm")],
+    )
+    result = await api.list_note_backed("nb")
+    assert [m.id for m in result] == ["note_mm"]
+    assert all(m.kind == MindMapKind.NOTE_BACKED for m in result)
+    # tree is populated for free from the already-listed note content.
+    assert result[0].tree == {"name": "NB", "children": []}
+    assert result[0].notebook_id == "nb"
+    mind_maps.list_mind_maps.assert_awaited_once_with("nb")
+    artifacts.list.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_list_note_backed_empty_when_no_note_backed_rows():
+    """No note-backed rows → an empty list (interactive maps never leak in)."""
+    api, _, mind_maps, artifacts, _ = _make_api(
+        interactive=[_interactive_artifact("int_mm")],
+    )
+    assert await api.list_note_backed("nb") == []
+    mind_maps.list_mind_maps.assert_awaited_once_with("nb")
+    artifacts.list.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -112,7 +148,7 @@ async def test_rename_missing_raises():
     api, *_ = _make_api()
     with pytest.raises(MindMapNotFoundError, match="not found") as excinfo:
         await api.rename("nb", "ghost", "X")
-    # Catchable via the cross-domain umbrella too (ADR-019).
+    # Catchable via the cross-domain umbrella too (ADR-0019).
     assert isinstance(excinfo.value, NotFoundError)
     assert excinfo.value.mind_map_id == "ghost"
 
@@ -220,8 +256,32 @@ async def test_generate_interactive_wait_false_skips_tree():
 
 
 @pytest.mark.asyncio
+async def test_generate_interactive_threads_instructions_into_create_params():
+    # The interactive CREATE_ARTIFACT payload carries a free-text prompt at
+    # [9][1][2] (the slot quiz/flashcards use; server-verified to steer variant
+    # 4). generate(instructions=...) must thread it there rather than drop it.
+    api, rpc, _, _, _ = _make_api(interactive=[_interactive_artifact("new_int")])
+    rpc.configure_mock(rpc_call=AsyncMock(return_value=[["new_int", "T", 4]]))
+    await api.generate(
+        "nb", ["s1"], kind=MindMapKind.INTERACTIVE, instructions="focus on X", wait=False
+    )
+    create_params = rpc.rpc_call.call_args_list[0][0][1]
+    assert create_params[2][9] == [None, [4, None, "focus on X"]]
+
+
+@pytest.mark.asyncio
+async def test_generate_interactive_without_instructions_keeps_bare_variant():
+    # No prompt → byte-identical [None, [4]] options block (unchanged request).
+    api, rpc, _, _, _ = _make_api(interactive=[_interactive_artifact("new_int")])
+    rpc.configure_mock(rpc_call=AsyncMock(return_value=[["new_int", "T", 4]]))
+    await api.generate("nb", ["s1"], kind=MindMapKind.INTERACTIVE, wait=False)
+    create_params = rpc.rpc_call.call_args_list[0][0][1]
+    assert create_params[2][9] == [None, [4]]
+
+
+@pytest.mark.asyncio
 async def test_generate_interactive_raises_feature_unavailable_when_no_artifact_id():
-    # ADR-019 async-kickoff null contract (issue #1359): a null/degenerate
+    # ADR-0019 async-kickoff null contract (issue #1359): a null/degenerate
     # CREATE_ARTIFACT raises ArtifactFeatureUnavailableError (no task created),
     # matching the sibling generate_* / retry_failed null-create paths.
     api, rpc, *_ = _make_api()
@@ -435,12 +495,11 @@ async def test_get_returns_matching_mind_map():
 
 
 @pytest.mark.asyncio
-async def test_get_warns_and_returns_none_when_absent():
-    # Neither backing contains the id -> None, but with a DeprecationWarning
-    # naming the v0.8.0 MindMapNotFoundError flip (#1358 runway for #1247).
+async def test_get_raises_when_absent():
+    # Neither backing contains the id -> MindMapNotFoundError (v0.8.0 flip, #1247).
     api, *_ = _make_api(note_rows=[["note_mm", "{}"]])
-    with pytest.warns(DeprecationWarning, match="MindMapNotFoundError"):
-        assert await api.get("nb", "ghost") is None
+    with pytest.raises(MindMapNotFoundError):
+        await api.get("nb", "ghost")
 
 
 @pytest.mark.asyncio
@@ -524,7 +583,7 @@ async def test_get_tree_auto_detect_interactive_falls_through_to_rpc():
 
 @pytest.mark.asyncio
 async def test_get_tree_auto_detect_missing_returns_none():
-    # Derived read (ADR-019): a missing parent yields the uniform-empty value
+    # Derived read (ADR-0019): a missing parent yields the uniform-empty value
     # (None), not a raise — get() is the existence check, not get_tree().
     api, rpc, *_ = _make_api()
     assert await api.get_tree("nb", "ghost") is None
@@ -569,9 +628,33 @@ async def test_delete_auto_detect_interactive():
 @pytest.mark.asyncio
 async def test_delete_auto_detect_missing_is_idempotent():
     # Auto-detect (kind=None) on an already-absent id is a no-op that returns
-    # None (ADR-019 idempotent delete), matching sources/artifacts/notes —
+    # None (ADR-0019 idempotent delete), matching sources/artifacts/notes —
     # not a raise. Neither delete RPC family is dispatched.
     api, _, mind_maps, artifacts, _ = _make_api()
     assert await api.delete("nb", "ghost") is None
     mind_maps.delete_mind_map.assert_not_awaited()
     artifacts.delete.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "create_response, expected",
+    [
+        ([["artifact_abc"]], "artifact_abc"),  # happy: [[id, ...]]
+        ([["artifact_abc", "extra"]], "artifact_abc"),  # id is slot 0
+        (None, None),  # null response
+        ([], None),  # empty response
+        ("nope", None),  # non-list response
+        ([[]], None),  # empty inner row
+        ([None], None),  # non-list inner row
+        ([[123]], None),  # non-str id
+    ],
+)
+def test_new_artifact_id_degenerate_shapes(create_response, expected):
+    """``_new_artifact_id`` keeps its soft ``CREATE_ARTIFACT`` contract after the
+    #1491 ``safe_index`` migration: every degenerate response shape returns
+    ``None`` (never raises ``UnknownRPCMethodError``), and a well-formed
+    ``[[id, ...]]`` yields the id. Pins the empty / non-list / non-str paths the
+    two guarded ``safe_index`` descents must keep soft."""
+    from notebooklm._mind_maps_api import _new_artifact_id
+
+    assert _new_artifact_id(create_response) == expected
