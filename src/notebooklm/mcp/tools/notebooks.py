@@ -16,6 +16,7 @@ This module imports NO ``click`` / ``rich`` / ``cli``.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastmcp import Context
@@ -25,6 +26,7 @@ from ..._app.serialize import to_jsonable
 from .._confirm import DESTRUCTIVE, READ_ONLY, needs_confirmation
 from .._context import get_client
 from .._errors import mcp_errors
+from .._paginate import DEFAULT_LIMIT, paginate
 from .._resolve import resolve_notebook
 from ._passthrough import passthrough_notebook_id
 from ._preview import title_for_id
@@ -34,12 +36,20 @@ def register(mcp: Any) -> None:
     """Register the notebook tools on ``mcp``."""
 
     @mcp.tool(annotations=READ_ONLY)
-    async def notebook_list(ctx: Context) -> dict[str, Any]:
-        """List all notebooks (id + title + metadata)."""
+    async def notebook_list(
+        ctx: Context, limit: int = DEFAULT_LIMIT, offset: int = 0
+    ) -> dict[str, Any]:
+        """List all notebooks (id + title + metadata).
+
+        Returns a bounded page: ``limit`` (default 50) items from ``offset`` (default
+        0), plus ``total`` / ``offset`` / ``has_more``. Page forward by re-calling
+        with ``offset += limit`` while ``has_more`` is true.
+        """
         client = get_client(ctx)
         with mcp_errors():
             notebooks = await client.notebooks.list()
-            return {"notebooks": to_jsonable(notebooks)}
+            page, meta = paginate(to_jsonable(notebooks), limit, offset)
+            return {"notebooks": page, **meta}
 
     @mcp.tool
     async def notebook_create(ctx: Context, title: str) -> dict[str, Any]:
@@ -52,17 +62,44 @@ def register(mcp: Any) -> None:
             # which key the notebook by ``notebook_id`` rather than nesting the
             # record under a ``notebook`` key (#1540). The remaining Notebook
             # fields (title, created_at, sources_count, is_owner, modified_at)
-            # stay at the top level so no metadata is dropped.
-            notebook = to_jsonable(result.notebook)
-            notebook_id = notebook.pop("id")
-            return {"notebook_id": notebook_id, **notebook}
+            # stay at the top level so no metadata is dropped. The
+            # created_at/modified_at backfill (#1699) now lives in the
+            # transport-neutral core (``execute_notebook_create``), so CLI / REST
+            # / MCP all get populated timestamps from one place (#1705) — no
+            # adapter-level re-read here.
+            record = to_jsonable(result.notebook)
+            notebook_id = record.pop("id")
+            return {"status": "created", "notebook_id": notebook_id, **record}
 
     @mcp.tool(annotations=READ_ONLY)
-    async def notebook_describe(ctx: Context, notebook: str) -> dict[str, Any]:
-        """Fetch a notebook's AI-generated description. Accepts a notebook name or ID."""
+    async def notebook_describe(
+        ctx: Context, notebook: str, include_metadata: bool = False
+    ) -> dict[str, Any]:
+        """Fetch a notebook's AI-generated description. Accepts a notebook name or ID.
+
+        Returns the resolved ``notebook_id`` plus the AI ``description``. Pass
+        ``include_metadata=True`` to additionally fetch the notebook's metadata
+        (details + source list) and surface it under a ``metadata`` key; the
+        default output (``include_metadata`` omitted) is unchanged.
+        """
         client = get_client(ctx)
         with mcp_errors():
             nb_id = await resolve_notebook(client, notebook)
+            if include_metadata:
+                # Two independent reads (description + metadata) → run concurrently
+                # (repo convention for independent RPCs). A NotebookLMError from
+                # either still propagates through ``mcp_errors``.
+                result, meta_result = await asyncio.gather(
+                    core.execute_notebook_describe(
+                        client, nb_id, resolve_notebook_id=passthrough_notebook_id
+                    ),
+                    core.execute_notebook_metadata(
+                        client, nb_id, resolve_notebook_id=passthrough_notebook_id
+                    ),
+                )
+                output = to_jsonable(result)
+                output["metadata"] = to_jsonable(meta_result.metadata)
+                return output
             result = await core.execute_notebook_describe(
                 client, nb_id, resolve_notebook_id=passthrough_notebook_id
             )
@@ -77,7 +114,7 @@ def register(mcp: Any) -> None:
             result = await core.execute_notebook_rename(
                 client, nb_id, new_title, resolve_notebook_id=passthrough_notebook_id
             )
-            return to_jsonable(result)
+            return {"status": "renamed", **to_jsonable(result)}
 
     @mcp.tool(annotations=DESTRUCTIVE)
     async def notebook_delete(ctx: Context, notebook: str, confirm: bool = False) -> dict[str, Any]:

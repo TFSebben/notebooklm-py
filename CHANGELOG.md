@@ -9,6 +9,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **MCP soft-404 body-pattern detection.** The `source_wait` content-sanity check
+  (#1698) now also flags a READY web page that sails past the thin-text threshold
+  but whose short body matches a dead-link / error-page boilerplate phrase (e.g.
+  "Whoops! broken link") — a soft-404 that ingests as a full-bodied 200. Body-only
+  (titles are never scanned), gated to sub-2000-char bodies, advisory-only (never
+  blocks), zero extra RPC (the body is already fetched). The batch
+  `source_add(urls=[...])` now surfaces the same warning per synchronously-ready
+  web-page item.
+- **MCP artifact rename & delete tools.** Two new MCP tools close the artifact
+  CRUD gap (the server previously exposed create + read only): `artifact_rename`
+  (title-only update) and `artifact_delete` (destructive, two-step `confirm`).
+  Both accept a notebook/artifact name **or** ID, cover every studio artifact
+  type including both mind-map kinds — note-backed maps route through the note
+  system, interactive maps and regular artifacts through the artifact RPC — over
+  the shared kind-aware `_app.artifacts` cores the CLI already uses. The MCP tool
+  surface is now **28 tools**.
+- **Live-API e2e coverage for the MCP server and the CLI binary.** The nightly
+  E2E job now installs `--extra mcp`, so the MCP/CLI layers run against the real
+  NotebookLM API once per release instead of being silently `importorskip`-ped.
+  New suites: per-domain MCP tool round-trips plus a 28-tool→test matrix
+  (`tests/e2e/test_mcp.py`); the HTTP transport, bearer gate, `.well-known`
+  discovery, and signed-URL upload/download routes driven in-process over
+  `httpx.ASGITransport` (`tests/e2e/test_mcp_http.py`); live-only contract
+  checks — the `source_ids` omitted-`==`-`[]`-`==`-all collapse (#1652),
+  not-found resolution, destructive confirm-gating, and the MCP error shape
+  (`tests/e2e/test_mcp_contracts.py`); and a CLI-binary `--json` smoke including
+  stdout-purity on a live failure (`tests/e2e/test_cli_live.py`). A standalone
+  `scripts/mcp_live_smoke.py` runs the upload+download round-trip against a
+  deployed server (PASS/FAIL) to bootstrap the new per-release manual
+  "MCP connector smoke" checklist in `docs/releasing.md`.
+- **Remote MCP file upload & download** (ADR-0024). Over the remote (HTTP)
+  connector — where the claude.ai browser can't carry the MCP credential and the
+  JSON-RPC channel can't carry bytes — `source_add type=file` and
+  `artifact_download` now broker a **short-lived HMAC-signed URL** served by the
+  same container, and the browser does the byte transfer out-of-band (the
+  established remote-MCP pattern; MCP has no native upload primitive and its
+  native binary-Resource download is capped far below a podcast/video). Upload
+  accepts a raw body over `POST`/`PUT` (a browser file-picker page **or** a
+  code-execution-sandbox `curl`), bounded by a 200 MiB per-request cap and an
+  in-flight-upload limit; download returns a clickable `resource_link`. Enabled
+  by `NOTEBOOKLM_MCP_PUBLIC_URL` (falls back to `NOTEBOOKLM_MCP_OAUTH_BASE_URL`);
+  unset → the two tools return a clear "not configured" error and the server
+  still starts. **stdio (local) installs are unchanged** — they keep reading and
+  writing real local paths. The REST `server` extra already supports native
+  multipart upload + `FileResponse` download and is unaffected. See
+  [docs/mcp-guide.md](docs/mcp-guide.md#file-upload--download-remote).
 - **Retrieve the generation prompt behind an artifact** (#1571). New
   `client.artifacts.get_prompt(notebook_id, artifact_id)` returns the free-text
   prompt an artifact was generated from, and a matching `artifact get-prompt`
@@ -108,7 +154,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Experimental: MCP server** (#1484, opt-in via the `mcp` extra). A
   [Model Context Protocol](https://modelcontextprotocol.io) server exposing
-  NotebookLM to MCP clients (Claude Desktop / Code, Cursor, Windsurf) as 25 tools
+  NotebookLM to MCP clients (Claude Desktop / Code, Cursor, Windsurf) as 28 tools
   across notebooks, sources, chat, notes, studio artifacts, and research — built
   as a transport-neutral sibling adapter over the `_app/` layer (ADR-0021), so it
   behaves identically to the equivalent `notebooklm` CLI command. Run it with the
@@ -126,6 +172,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **MCP `source_wait` now returns one unified per-source aggregate** (#1669).
+  Both modes — waiting for a single `source` or for every source in the notebook
+  — return the same shape: `{notebook_id, ok, ready, timed_out, failed,
+  not_found}`. `ready` carries the sources that reached READY (with
+  `kind`/`status_label` labels); the three error buckets carry
+  `{source_id, error}` entries; `ok` is `true` iff all error buckets are empty.
+  Previously the single-source mode returned `{status: ready|not_found|failed|
+  timeout}` while the all-sources mode **threw on the first failure and discarded
+  every source that had already become ready** — the all-sources mode now reports
+  **partial progress** instead. (A `source` reference that does not resolve still
+  raises NOT_FOUND before the wait — an input error, distinct from a resolved
+  source the backend reports missing/failed/slow.)
 - **Regenerable test baselines (Phase 1; contributor-facing, no public API
   change).** Frozen public-surface snapshots that were hand-typed copies of
   values the code already derives — `_FROZEN_TYPES_ALL` and

@@ -52,6 +52,7 @@ See [Configuration](configuration.md) for full env-var precedence and CI/CD setu
 | Command | Description | Example |
 |---------|-------------|---------|
 | `login` | Authenticate via browser | `notebooklm login` / `notebooklm login --browser msedge` |
+| `login --master-token` | Headless auth: mint cookies from a durable master token (`[headless]`) | `notebooklm login --master-token --account you@gmail.com` |
 | `use <id>` | Set active notebook | `notebooklm use abc123` |
 | `status` | Show current context | `notebooklm status` |
 | `status --paths` | Show configuration paths | `notebooklm status --paths` |
@@ -129,7 +130,7 @@ See [Configuration](configuration.md) for full env-var precedence and CI/CD setu
 | `ask --save-as-note` | Save response as a note. When the answer contains `[N]` citations, the saved note preserves interactive hover-anchored citation links matching the NotebookLM web UI's "Save to note" behavior ([issue #660](https://github.com/teng-lin/notebooklm-py/issues/660)). Answers without citations fall back to a plain-text note. | `notebooklm ask "Explain X" --save-as-note` |
 | `ask --save-as-note --note-title` | Save response with custom note title. The NotebookLM server may apply smart-title generation for citation-rich saves and override the requested title; the success message reflects what the server actually stored. | `notebooklm ask "Explain X" --save-as-note --note-title "Title"` |
 | `suggest-prompts` | Get AI-suggested prompts for the notebook (each a title plus a ready-to-send instruction for `ask`) | `notebooklm suggest-prompts` |
-| `suggest-prompts --mode N` | Select the suggestion surface (1-9, default 4): 4=chat questions, 5=critique, 6=audio/debate, 8=quiz, 9=flashcards. Out-of-range exits 1. | `notebooklm suggest-prompts --mode 8` |
+| `suggest-prompts --mode N` | Select the suggestion surface (1-10, default 4): 1=audio deep-dive, 2=audio brief, 3=video explainer, 4=chat questions, 5=audio critique, 6=audio debate, 8=quiz, 9=flashcards, 10=video short. Out-of-range exits 1. | `notebooklm suggest-prompts --mode 8` |
 | `suggest-prompts --query TEXT` | Free-text steer for the kind of prompts to suggest | `notebooklm suggest-prompts --query "key risks"` |
 | `suggest-prompts -s <id>` | Limit to specific source IDs (repeatable; defaults to all sources) | `notebooklm suggest-prompts -s src1 -s src2` |
 | `suggest-prompts --json` | Machine-readable output (`{notebook_id, suggestions, count}`) | `notebooklm suggest-prompts --json` |
@@ -410,6 +411,14 @@ By default, opens a Chromium browser with a persistent profile. Complete the Goo
 - `--fresh` - Start with a clean browser session (deletes the cached browser profile). Use to switch Google accounts. Has no effect with `--browser-cookies`.
 - `--include-domains LABEL[,LABEL...]` - Opt in to extracting sibling-product cookies (default: required Google auth/Drive cookies only). Supported labels: `youtube`, `docs`, `myaccount`, `mail`, `all`. Pass labels comma-separated or repeat the flag.
 
+**Master-token (headless) options** — mint/refresh web cookies from a durable Google master token, no per-session browser. Requires `pip install "notebooklm-py[headless]"`. Full guide: [installation.md#d-headless-server-or-ci](installation.md#d-headless-server-or-ci).
+- `--master-token` - Bootstrap headless auth. Requires `--account EMAIL`. A visible browser opens Google's EmbeddedSetup to capture the single-use `oauth_token` (needs `[browser]`), or pass it with `--oauth-token`. Exchanges it for a durable master token (saved `0600` at `master_token.json`), mints cookies into `storage_state.json`, and verifies by listing notebooks.
+- `--master-token-refresh` - Re-mint cookies from the stored master token, no prompt (for recovery / cron). Replaces `storage_state.json` cookies, preserving CLI context.
+- `--oauth-token VALUE` - Provide the single-use EmbeddedSetup `oauth_token` manually (headless boxes without `[browser]`).
+- `--cdp-url URL` - Capture `oauth_token` by attaching to a running Chrome over CDP (e.g. `http://localhost:9222`) instead of launching a browser.
+- `--android-id HEX` - Override the per-install Android id (default: generated and persisted with the token). ⚠️ The master token is a **full-account, durable** credential — use a dedicated/throwaway account only.
+- `--force` - With `--master-token`, overwrite even if the target profile already holds a session for a **different** account. Without it, a mismatched `--account` is refused (use a dedicated `-p <profile>` instead) so account B's mint can't silently clobber account A's profile.
+
 **Examples:**
 ```bash
 # Default (Chromium)
@@ -440,6 +449,11 @@ notebooklm login --browser-cookies chrome --all-accounts
 
 # Force a clean browser session before logging in
 notebooklm login --fresh
+
+# Headless master-token auth (one browser sign-in, then no per-session browser)
+notebooklm login --master-token --account you@gmail.com
+notebooklm login --master-token --account you@gmail.com --oauth-token "$OAUTH_TOKEN"  # headless box
+notebooklm login --master-token-refresh   # re-mint cookies from the stored token
 ```
 
 **Notes on `--browser-cookies`:**

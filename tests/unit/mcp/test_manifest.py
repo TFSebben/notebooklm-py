@@ -3,10 +3,10 @@
 Builds the server (bound to a mock client) and lists its tools through the
 in-memory FastMCP ``Client``, then pins:
 
-* the EXACT set of tool names (the 25 of Phase 2a + 2b plus ``research_cancel``)
-  — so a tool can't be silently added, removed, or renamed without updating this
-  gate;
-* a tool-count ceiling (28) leaving a little headroom over the ~25 design target;
+* the EXACT set of tool names — so a tool can't be silently added, removed, or
+  renamed without updating this gate;
+* a tool-count ceiling (40): the current surface is 32 tools; the next tool
+  stays under the ceiling, but an accidental explosion still trips the gate;
 * the ``destructiveHint`` annotation + a ``confirm`` parameter on every
   destructive (delete) tool; and
 * the ``readOnlyHint`` annotation on every read-only tool.
@@ -23,7 +23,7 @@ import pytest
 pytest.importorskip("fastmcp")
 
 
-#: The complete, pinned tool surface. 26 tools across 7 domains. Adding or
+#: The complete, pinned tool surface. 32 tools across 8 domains. Adding or
 #: removing a tool MUST update this set (and the ceiling below if it grows).
 EXPECTED_TOOLS: frozenset[str] = frozenset(
     {
@@ -35,42 +35,54 @@ EXPECTED_TOOLS: frozenset[str] = frozenset(
         "notebook_delete",
         # Sources (6)
         "source_list",
-        "source_get_content",
+        "source_read",
         "source_rename",
         "source_delete",
         "source_wait",
         "source_add",
-        # Chat (2)
+        # Chat (3)
         "chat_ask",
         "chat_configure",
-        # Notes (4)
-        "note_create",
-        "note_list",
-        "note_update",
-        "note_delete",
-        # Artifacts (4)
-        "artifact_list",
-        "artifact_generate",
-        "artifact_status",
-        "artifact_download",
+        "suggest_prompts",
+        # Notes (1)
+        "note_save",
+        # Studio (8)
+        "studio_list",
+        "studio_generate",
+        "studio_status",
+        "studio_get_prompt",
+        "studio_download",
+        "studio_rename",
+        "studio_retry",
+        "studio_delete",
         # Research (4)
         "research_start",
         "research_status",
         "research_import",
         "research_cancel",
+        # Sharing (4)
+        "share_status",
+        "share_set_access",
+        "share_set_user",
+        "share_remove_user",
         # Meta (1)
         "server_info",
     }
 )
 
-#: Tool-count ceiling. The design target is ~25; 28 leaves a little headroom so a
-#: deliberate addition is a one-line bump, but an accidental explosion still
-#: trips the gate.
-TOOL_CEILING = 28
+#: Tool-count ceiling. The design target is ~25; the sharing domain (#1684) took
+#: the surface to 34, the artifact get-prompt/retry tools took it to 36, and
+#: suggest_prompts to 37; the Tier-1 read-merges (source_describe+source_get_content
+#: → source_read) and the Studio consolidation (note_create+note_update → note_save,
+#: note_list+note_delete folded into studio_list/studio_delete) brought it to 32. The
+#: ceiling has headroom, but an accidental explosion still trips the gate.
+TOOL_CEILING = 40
 
-#: The three destructive tools — each carries ``destructiveHint`` AND a
-#: ``confirm`` parameter (the both-mode confirmation contract).
-DESTRUCTIVE_TOOLS: frozenset[str] = frozenset({"notebook_delete", "source_delete", "note_delete"})
+#: The destructive tools — each carries ``destructiveHint`` AND a ``confirm``
+#: parameter (the both-mode confirmation contract).
+DESTRUCTIVE_TOOLS: frozenset[str] = frozenset(
+    {"notebook_delete", "source_delete", "studio_delete", "share_remove_user"}
+)
 
 #: Read-only tools — each carries ``readOnlyHint``.
 READ_ONLY_TOOLS: frozenset[str] = frozenset(
@@ -78,11 +90,13 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset(
         "notebook_list",
         "notebook_describe",
         "source_list",
-        "source_get_content",
-        "note_list",
-        "artifact_list",
-        "artifact_status",
+        "source_read",
+        "studio_list",
+        "studio_status",
+        "studio_get_prompt",
         "research_status",
+        "share_status",
+        "suggest_prompts",
         "server_info",
     }
 )
@@ -136,3 +150,60 @@ async def test_read_only_and_destructive_are_disjoint() -> None:
     assert not (READ_ONLY_TOOLS & DESTRUCTIVE_TOOLS)
     assert READ_ONLY_TOOLS <= EXPECTED_TOOLS
     assert DESTRUCTIVE_TOOLS <= EXPECTED_TOOLS
+
+
+async def test_studio_rename_is_plain_mutating_tool(tools_by_name) -> None:
+    """``studio_rename`` mutates but is neither read-only nor destructive.
+
+    A title-only update carries default annotations (no ``readOnlyHint``, no
+    ``destructiveHint``) and no ``confirm`` gate — so it must stay out of both the
+    read-only and destructive pinned sets.
+    """
+    assert "studio_rename" in tools_by_name
+    assert "studio_rename" not in READ_ONLY_TOOLS
+    assert "studio_rename" not in DESTRUCTIVE_TOOLS
+    tool = tools_by_name["studio_rename"]
+    if tool.annotations is not None:
+        assert not tool.annotations.readOnlyHint
+        assert not tool.annotations.destructiveHint
+    assert "confirm" not in tool.inputSchema.get("properties", {})
+
+
+async def test_studio_retry_is_plain_mutating_tool(tools_by_name) -> None:
+    """``studio_retry`` mutates but is neither read-only nor destructive.
+
+    Kicking off a retry carries default annotations (no ``readOnlyHint``, no
+    ``destructiveHint``) and no ``confirm`` gate — so it must stay out of both the
+    read-only and destructive pinned sets.
+    """
+    assert "studio_retry" in tools_by_name
+    assert "studio_retry" not in READ_ONLY_TOOLS
+    assert "studio_retry" not in DESTRUCTIVE_TOOLS
+    tool = tools_by_name["studio_retry"]
+    if tool.annotations is not None:
+        assert not tool.annotations.readOnlyHint
+        assert not tool.annotations.destructiveHint
+    assert "confirm" not in tool.inputSchema.get("properties", {})
+
+
+async def test_studio_download_advertises_artifact_id_and_format_enum(tools_by_name) -> None:
+    """``studio_download`` advertises the ``artifact_id`` param and an enumerated
+    ``output_format`` so an agent's tool schema can target a specific artifact and
+    pick a valid format (issue #1668)."""
+    import json
+
+    tool = tools_by_name["studio_download"]
+    properties = tool.inputSchema.get("properties", {})
+    assert "artifact_id" in properties, "studio_download must expose 'artifact_id'"
+    assert "artifact" in properties, "studio_download must expose the 'artifact' name-or-id ref"
+    assert "output_format" in properties, "studio_download must expose 'output_format'"
+    # output_format is a Literal union → the schema (possibly under anyOf for the
+    # optional ``| None``) must enumerate every supported format value.
+    fmt_schema = json.dumps(properties["output_format"])
+    for value in ("pdf", "pptx", "json", "markdown", "html"):
+        assert value in fmt_schema, f"output_format schema missing {value!r}: {fmt_schema}"
+    # ``artifact_type`` is now optional (target by ``artifact`` ref instead) but must
+    # still advertise its full type enum so the by-type path stays schema-guided.
+    type_schema = json.dumps(properties["artifact_type"])
+    for value in ("audio", "video", "slide-deck", "quiz", "flashcards"):
+        assert value in type_schema, f"artifact_type schema missing {value!r}: {type_schema}"

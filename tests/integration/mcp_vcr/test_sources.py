@@ -14,12 +14,14 @@ Tools covered and the cassette each replays:
   ``sources_add_file.yaml`` (``ADD_SOURCE_FILE`` → ``o4cbdc`` + upload POSTs);
   ``drive`` over ``sources_add_drive.yaml`` (``ADD_SOURCE`` → ``izAoDd``).
 * ``source_rename`` over ``sources_rename.yaml`` (``UPDATE_SOURCE`` → ``b7Wfje``).
-* ``source_get_content`` over ``sources_get_fulltext.yaml`` — only the leading
-  ``GET_NOTEBOOK`` (``rLM1Ne``) is consumed (``execute_source_get`` filters the
-  source list); the trailing ``hizoJc`` interaction is left unplayed.
-* ``source_wait`` (single + all) over ``sources_list.yaml`` — the poller probes
-  source status via the same ``GET_NOTEBOOK`` list, and every recorded source is
-  already ``READY`` so it resolves on the first poll.
+* ``source_read`` over ``sources_get_fulltext.yaml`` — consumes BOTH the
+  leading ``GET_NOTEBOOK`` (``rLM1Ne``, metadata via ``execute_source_get``) and
+  the trailing ``hizoJc`` (``GET_SOURCE``, full text via ``execute_source_fulltext``).
+* ``source_wait`` (single + all) over ``sources_wait.yaml`` (= ``sources_list.yaml``
+  plus one real ``hizoJc`` ``GET_SOURCE`` interaction) — the poller probes source
+  status via the same ``GET_NOTEBOOK`` list, and every recorded source is already
+  ``READY`` so it resolves on the first poll; the lone web-page source's body is
+  fetched for the #1698 content-sanity check.
 
 Every tool is invoked with a FULL canonical UUID (the cassette's recorded
 notebook/source id) so the resolver takes its full-UUID fast path and never adds
@@ -46,7 +48,7 @@ pytestmark = [pytest.mark.vcr, skip_no_cassettes]
 # the id — but reusing the recorded id keeps intent obvious.
 SOURCES_LIST_NOTEBOOK_ID = "c3f6285f-1709-44c4-9cd6-e95cf0ea4f5e"
 # A source id present in ``sources_list.yaml``'s ``GET_NOTEBOOK`` list (status
-# READY) — used by ``source_get_content`` / ``source_wait``, whose lookups
+# READY) — used by ``source_read`` / ``source_wait``, whose lookups
 # filter that list and must find a matching row.
 SOURCES_LIST_SOURCE_ID = "a474cd35-6c21-4e72-94a0-c38b5491b449"
 SOURCES_LIST_SOURCE_TITLE = (
@@ -73,7 +75,7 @@ RENAME_ECHOED_SOURCE_ID = "b1b9efdd-b2af-4974-ad97-16025c05f1d7"
 RENAME_ECHOED_TITLE = "VCR Test Renamed Source"
 
 # ``sources_get_fulltext.yaml`` GET_NOTEBOOK was recorded against this notebook;
-# ``source_get_content`` consumes only that leading ``rLM1Ne`` interaction.
+# ``source_read`` consumes its ``rLM1Ne`` (metadata) + ``hizoJc`` (full text).
 GET_CONTENT_NOTEBOOK_ID = "167481cd-23a3-4331-9a45-c8948900bf91"
 
 
@@ -185,15 +187,26 @@ async def test_mcp_source_add_url_over_vcr() -> None:
     assert isinstance(structured, dict)
     # The url flow wraps the added source under "source" (no notebook_id echo —
     # that is the drive flow's shape).
-    assert set(structured) == {"source"}
+    assert set(structured) == {"source", "status"}
     source = structured["source"]
     assert isinstance(source, dict)
     assert source["id"] == "20d66b0b-787f-480e-a9c1-6823f7a12d8e"
     assert source["title"] == "Artificial intelligence - Wikipedia"
     assert source["url"] == "https://en.wikipedia.org/wiki/Artificial_intelligence"
-    # The serialized Source carries the full typed-field set.
-    assert set(source) == {"id", "title", "url", "_type_code", "created_at", "status"}
+    # The serialized Source carries the full typed-field set plus the agent-readable
+    # ``kind``/``status_label`` labels source_add now adds (parity with source_list).
+    assert set(source) == {
+        "id",
+        "title",
+        "url",
+        "_type_code",
+        "created_at",
+        "status",
+        "kind",
+        "status_label",
+    }
     assert source["status"] == 2  # SourceStatus.READY
+    assert source["status_label"] == "ready"
 
 
 @pytest.mark.asyncio
@@ -218,7 +231,7 @@ async def test_mcp_source_add_text_over_vcr() -> None:
 
     structured = result.structured_content
     assert isinstance(structured, dict)
-    assert set(structured) == {"source"}
+    assert set(structured) == {"source", "status"}
     source = structured["source"]
     assert isinstance(source, dict)
     # The recorded ADD_SOURCE echo titles the source from the recording, not the
@@ -254,7 +267,7 @@ async def test_mcp_source_add_file_over_vcr(tmp_path) -> None:
 
     structured = result.structured_content
     assert isinstance(structured, dict)
-    assert set(structured) == {"source"}
+    assert set(structured) == {"source", "status"}
     source = structured["source"]
     assert isinstance(source, dict)
     assert source["id"] == "dc84ca28-2629-49ac-aec3-de45f0ec93e4"
@@ -289,7 +302,7 @@ async def test_mcp_source_add_drive_over_vcr() -> None:
 
     structured = result.structured_content
     assert isinstance(structured, dict)
-    assert set(structured) == {"source", "notebook_id", "file_id", "mime_type"}
+    assert set(structured) == {"source", "notebook_id", "file_id", "mime_type", "status"}
     # The drive envelope echoes the request inputs alongside the added source.
     assert structured["notebook_id"] == ADD_DRIVE_NOTEBOOK_ID
     assert structured["file_id"] == "1AbCdEfGhIjKlMnOpQrStUvWxYz"
@@ -330,7 +343,7 @@ async def test_mcp_source_rename_over_vcr() -> None:
 
     structured = result.structured_content
     assert isinstance(structured, dict)
-    assert set(structured) == {"source", "notebook_id"}
+    assert set(structured) == {"source", "notebook_id", "status"}
     assert structured["notebook_id"] == RENAME_NOTEBOOK_ID
     source = structured["source"]
     assert isinstance(source, dict)
@@ -342,25 +355,25 @@ async def test_mcp_source_rename_over_vcr() -> None:
 
 
 # ---------------------------------------------------------------------------
-# source_get_content
+# source_read
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 @notebooklm_vcr.use_cassette("sources_get_fulltext.yaml")
-async def test_mcp_source_get_content_over_vcr() -> None:
-    """``source_get_content`` returns the resolved source through the real client.
+async def test_mcp_source_read_over_vcr() -> None:
+    """``source_read`` returns the resolved source metadata AND its full text.
 
-    ``execute_source_get`` calls ``client.sources.get_or_none``, which filters the
-    notebook's ``GET_NOTEBOOK`` (``rLM1Ne``) source list — so only the cassette's
-    leading ``rLM1Ne`` interaction is consumed (the trailing ``hizoJc`` fulltext
-    interaction is left unplayed). The full-UUID source ref skips the resolver's
-    own list preflight, and the id must exist in the recorded list for the lookup
-    to return a (non-``None``) source rather than NOT_FOUND.
+    ``execute_source_get`` calls ``client.sources.get_or_none`` (filters the
+    notebook's ``GET_NOTEBOOK`` / ``rLM1Ne`` source list), then
+    ``execute_source_fulltext`` issues ``GET_SOURCE`` (``hizoJc``) — so both
+    cassette interactions are consumed. The full-UUID source ref skips the
+    resolver's own list preflight, and the id must exist in the recorded list for
+    the lookup to return a (non-``None``) source rather than NOT_FOUND.
     """
     async with build_mcp_client() as mcp_client:
         result = await mcp_client.call_tool(
-            "source_get_content",
+            "source_read",
             {
                 "notebook": GET_CONTENT_NOTEBOOK_ID,
                 "source": SOURCES_LIST_SOURCE_ID,
@@ -369,8 +382,16 @@ async def test_mcp_source_get_content_over_vcr() -> None:
 
     structured = result.structured_content
     assert isinstance(structured, dict)
-    # ``execute_source_get`` projects to {"notebook_id", "source_id", "source"}.
-    assert set(structured) == {"notebook_id", "source_id", "source"}
+    # Now projects metadata PLUS the full-text fields.
+    assert set(structured) == {
+        "notebook_id",
+        "source_id",
+        "source",
+        "content",
+        "char_count",
+        "truncated",
+        "output_format",
+    }
     assert structured["notebook_id"] == GET_CONTENT_NOTEBOOK_ID
     assert structured["source_id"] == SOURCES_LIST_SOURCE_ID
     source = structured["source"]
@@ -379,6 +400,18 @@ async def test_mcp_source_get_content_over_vcr() -> None:
     assert source["title"] == SOURCES_LIST_SOURCE_TITLE
     assert source["url"] == "https://github.com/shareAI-lab/learn-claude-code"
     assert source["status"] == 2  # SourceStatus.READY
+    # String labels accompany the raw codes (agent-readable).
+    assert source["kind"] == "web_page"
+    assert source["status_label"] == "ready"
+    # Full text came back from the recorded GET_SOURCE interaction, bounded by the
+    # default 10k cap: ``char_count`` is the FULL length, ``content`` is the (≤10k)
+    # returned window, and ``truncated`` reflects whether the window omits any tail.
+    assert structured["output_format"] == "text"
+    content = structured["content"]
+    assert isinstance(content, str) and content
+    assert len(content) <= 10_000  # default cap applied
+    assert structured["char_count"] >= len(content)
+    assert structured["truncated"] == (structured["char_count"] > len(content))
 
 
 # ---------------------------------------------------------------------------
@@ -387,14 +420,23 @@ async def test_mcp_source_get_content_over_vcr() -> None:
 
 
 @pytest.mark.asyncio
-@notebooklm_vcr.use_cassette("sources_list.yaml")
+@notebooklm_vcr.use_cassette("sources_wait.yaml")
 async def test_mcp_source_wait_single_over_vcr() -> None:
     """``source_wait`` (single source) resolves immediately for a READY source.
 
     ``execute_source_wait`` drives ``client.sources.wait_until_ready``, whose
     poller probes source status via the same ``GET_NOTEBOOK`` (``rLM1Ne``) list.
     The recorded source is already ``READY``, so it resolves on the first poll
-    and the tool returns the ``"ready"`` outcome wire shape.
+    and the tool returns the unified aggregate (``ok`` True, the source in
+    ``ready``, all error buckets empty).
+
+    The recorded source is a ``web_page``, so the #1698 content-sanity check
+    issues a ``GET_SOURCE`` (``hizoJc``) fetch for it — replayed from
+    ``sources_wait.yaml`` (= ``sources_list.yaml`` plus that one real interaction).
+    Its body is ample (11,819 chars ≫ the thin threshold), so NO ``warning`` is
+    attached: this end-to-end replay confirms a healthy ready page is not flagged.
+    (The per-kind fetch logic — web-page-only, thin → warning — is pinned by the
+    unit tests in ``tests/unit/mcp/test_sources.py``.)
     """
     async with build_mcp_client() as mcp_client:
         result = await mcp_client.call_tool(
@@ -409,26 +451,37 @@ async def test_mcp_source_wait_single_over_vcr() -> None:
 
     structured = result.structured_content
     assert isinstance(structured, dict)
-    # Single-source ready outcome: {"notebook_id", "status", "source"}.
-    assert set(structured) == {"notebook_id", "status", "source"}
+    # Unified aggregate shape, shared with the all-sources branch.
+    assert set(structured) == {"notebook_id", "ok", "ready", "timed_out", "failed", "not_found"}
     assert structured["notebook_id"] == SOURCES_LIST_NOTEBOOK_ID
-    assert structured["status"] == "ready"
-    source = structured["source"]
-    assert isinstance(source, dict)
+    assert structured["ok"] is True
+    assert structured["timed_out"] == structured["failed"] == structured["not_found"] == []
+    ready = structured["ready"]
+    assert len(ready) == 1
+    source = ready[0]
     assert source["id"] == SOURCES_LIST_SOURCE_ID
     assert source["status"] == 2  # SourceStatus.READY
+    assert source["status_label"] == "ready"
+    # The web-page body fetched ample text → no thin-content warning.
+    assert "warning" not in source
 
 
 @pytest.mark.asyncio
-@notebooklm_vcr.use_cassette("sources_list.yaml", allow_playback_repeats=True)
+@notebooklm_vcr.use_cassette("sources_wait.yaml", allow_playback_repeats=True)
 async def test_mcp_source_wait_all_over_vcr() -> None:
     """``source_wait`` (no ``source``) waits for every source in the notebook.
 
     The all-sources branch lists sources (``GET_NOTEBOOK`` → ``rLM1Ne``) then
-    waits on each id. Every recorded source is already ``READY``, so they all
-    resolve on the first poll and the tool returns the ``{"notebook_id",
-    "ready": [...]}`` wire shape. ``allow_playback_repeats`` lets the per-source
-    polls re-match the single recorded ``rLM1Ne`` interaction.
+    fans out a per-source wait on each id. Every recorded source is already
+    ``READY``, so they all resolve on the first poll and the tool returns the
+    unified aggregate (``ok`` True, the sources in ``ready``, error buckets
+    empty). ``allow_playback_repeats`` lets the per-source polls re-match the
+    single recorded ``rLM1Ne`` interaction.
+
+    The lone ``web_page`` source triggers the #1698 content-sanity ``GET_SOURCE``
+    (``hizoJc``) fetch (the 7 ``pasted_text`` sources are skipped by the kind gate);
+    its ample body yields no ``warning``. ``sources_wait.yaml`` carries that one
+    extra interaction. (Web-page-only fetching is pinned by the unit tests.)
     """
     async with build_mcp_client() as mcp_client:
         result = await mcp_client.call_tool(
@@ -442,8 +495,10 @@ async def test_mcp_source_wait_all_over_vcr() -> None:
 
     structured = result.structured_content
     assert isinstance(structured, dict)
-    assert set(structured) == {"notebook_id", "ready"}
+    assert set(structured) == {"notebook_id", "ok", "ready", "timed_out", "failed", "not_found"}
     assert structured["notebook_id"] == SOURCES_LIST_NOTEBOOK_ID
+    assert structured["ok"] is True
+    assert structured["timed_out"] == structured["failed"] == structured["not_found"] == []
     ready = structured["ready"]
     assert isinstance(ready, list)
     assert ready, "expected at least one ready source from the cassette"
@@ -451,3 +506,5 @@ async def test_mcp_source_wait_all_over_vcr() -> None:
     assert SOURCES_LIST_SOURCE_ID in ids
     # Every returned source is READY (the wait only yields ready sources).
     assert all(row["status"] == 2 for row in ready)
+    # The one web_page has ample text → no thin-content warning anywhere.
+    assert all("warning" not in row for row in ready)

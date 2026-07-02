@@ -100,6 +100,21 @@ async with NotebookLMClient.from_storage("/path/to/storage_state.json") as clien
 async with NotebookLMClient.from_storage(profile="work") as client:
     ...
 
+# Headless: mint cookies from a durable master token (the [headless] extra),
+# then drive the normal client. No per-session browser; expired sessions
+# re-mint automatically when master_token.json sits beside storage_state.json.
+# (One-time bootstrap: `notebooklm login --master-token --account you@gmail.com`.)
+import json
+from notebooklm.auth import mint_cookies, persist_minted_jar, read_master_token
+from notebooklm.paths import get_master_token_path, get_storage_path
+
+rec = read_master_token(get_master_token_path())            # {email, android_id, master_token}
+jar = await mint_cookies(rec["email"], rec["master_token"], rec["android_id"])
+persist_minted_jar(get_storage_path(), jar, email=rec["email"])
+async with NotebookLMClient.from_storage() as client:       # inline PSIDTS recovery heals the jar
+    ...
+# ⚠️ The master token is a full-account, durable credential — dedicated account only.
+
 # From AuthTokens directly
 from notebooklm import AuthTokens
 auth = AuthTokens(
@@ -943,7 +958,7 @@ async with NotebookLMClient.from_storage(rate_limit_max_retries=0) as client:
 | `delete(notebook_id)` | `notebook_id: str` | `None` | Delete a notebook (idempotent; returns `None` whether or not it existed) |
 | `rename(notebook_id, new_title)` | `notebook_id: str, new_title: str` | `Notebook` | Rename a notebook (re-fetched; raises `NotebookNotFoundError` if missing) |
 | `get_description(notebook_id)` | `notebook_id: str` | `NotebookDescription` | Get AI summary and topics |
-| `suggest_prompts(notebook_id, *, source_ids=None, mode=4, query=None)` | `str, list[str] \| None, int, str \| None` | `list[PromptSuggestion]` | Get AI-suggested prompts for the notebook. `source_ids=None` uses all sources; `mode` is the required `1..9` "mode/surface" int (default `4` suggests chat questions; other modes target other surfaces); `query` optionally steers the suggestions. Each `PromptSuggestion.prompt` is a ready-to-send instruction for `ask()`. |
+| `suggest_prompts(notebook_id, *, source_ids=None, mode=4, query=None)` | `str, list[str] \| None, int, str \| None` | `list[PromptSuggestion]` | Get AI-suggested prompts for the notebook. `source_ids=None` uses all sources; `mode` is the required `1..10` "mode/surface" int (default `4` suggests chat questions; other modes target other surfaces); `query` optionally steers the suggestions. Each `PromptSuggestion.prompt` is a ready-to-send instruction for `ask()`. |
 | `get_metadata(notebook_id)` | `notebook_id: str` | `NotebookMetadata` | Get notebook metadata and sources |
 | `get_summary(notebook_id)` | `notebook_id: str` | `str` | Get raw summary text |
 | `get_share_url(notebook_id, artifact_id=None)` | `notebook_id: str, str \| None` | `str` | Get a share URL |
