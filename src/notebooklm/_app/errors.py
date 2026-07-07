@@ -49,6 +49,7 @@ This module is transport-neutral — no ``click`` / ``rich`` / ``cli`` /
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 
@@ -117,6 +118,52 @@ class ErrorCategory(Enum):
     UNEXPECTED = "unexpected"
 
 
+#: Short remediation hint for each :class:`ErrorCategory`, or ``None`` when no
+#: useful action exists beyond reading the message. This is the single neutral
+#: source of truth for the hint text shared by the MCP projector (which pairs it
+#: with its own manifest ``code`` in ``mcp/_errors.CATEGORY_TABLE``) and the REST
+#: error body (``server/_errors``), so the two surfaces cannot drift. Covers
+#: EVERY category (pinned by the adapter coverage tests).
+CATEGORY_HINTS: dict[ErrorCategory, str | None] = {
+    ErrorCategory.NOT_FOUND: (
+        "Check the id/name with the matching *_list tool; the resource may have been deleted."
+    ),
+    ErrorCategory.AUTH: "Re-authenticate and retry.",
+    ErrorCategory.RATE_LIMITED: "Back off and retry after a short delay.",
+    ErrorCategory.VALIDATION: "Fix the invalid argument and retry; this will not succeed unchanged.",
+    ErrorCategory.CONFIG: "Check the auth profile / storage configuration.",
+    ErrorCategory.NETWORK: "Transient connectivity issue; retry.",
+    ErrorCategory.NOTEBOOK_LIMIT: "Notebook quota is exhausted; delete an existing notebook first.",
+    ErrorCategory.ARTIFACT_TIMEOUT: (
+        "Generation is still running; poll the task status with the task_id."
+    ),
+    ErrorCategory.TIMEOUT: "The operation did not finish in time; retry or poll for completion.",
+    ErrorCategory.SERVER: "Upstream NotebookLM error; retry after a short delay.",
+    ErrorCategory.RPC: None,
+    ErrorCategory.SOURCE_MUTATION: (
+        "Resolve the source reference (it was missing, ambiguous, or needs confirmation)."
+    ),
+    ErrorCategory.LIBRARY: None,
+    ErrorCategory.UNEXPECTED: None,
+}
+
+
+def did_you_mean_hint(candidates: Sequence[Mapping[str, str]]) -> str:
+    """Build the NOT_FOUND "did you mean" hint from near-miss candidates.
+
+    Shared by every surface (MCP ``tool_error_payload``, the REST error body,
+    the CLI ``NOT_FOUND`` envelope) so the phrasing cannot drift. Lists each
+    candidate's title **and id** inline — the MCP wire flattens the structured
+    error to a string via ``to_tool_error`` (which serializes only
+    code/message/retriable/hint and drops the structured ``candidates`` list), so
+    the id must live in the hint text for a flat-string client to retry by id
+    without another list call. Replaces the generic :data:`CATEGORY_HINTS`
+    NOT_FOUND hint only when a lookup actually produced near matches.
+    """
+    parts = ", ".join(f"{c['title']!r} (id: {c['id']})" for c in candidates)
+    return f"Did you mean: {parts}? Pass the full title or id."
+
+
 @dataclass(frozen=True)
 class ClassifiedError:
     """The neutral classification of an exception.
@@ -144,6 +191,18 @@ _RETRIABLE_CATEGORIES = frozenset(
         ErrorCategory.NETWORK,
     }
 )
+
+
+def is_retriable(category: ErrorCategory) -> bool:
+    """Return whether retrying an operation that failed with ``category`` may succeed.
+
+    The single neutral source of the retriability decision (the same
+    :data:`_RETRIABLE_CATEGORIES` set that backs :func:`classify`), so a surface
+    that only knows a *category* (e.g. the REST server projecting a hand-raised
+    ``HTTPException`` status onto a category, where there is no exception to
+    :func:`classify`) can read the same flag without re-deriving it.
+    """
+    return category in _RETRIABLE_CATEGORIES
 
 
 def _normalized_rpc_code(exc: ClientError) -> int | None:
@@ -255,4 +314,4 @@ def classify(exc: BaseException) -> ClassifiedError:
         (``isinstance``), so it is stable and side-effect-free.
     """
     category = _category_for(exc)
-    return ClassifiedError(category=category, retriable=category in _RETRIABLE_CATEGORIES)
+    return ClassifiedError(category=category, retriable=is_retriable(category))

@@ -147,6 +147,8 @@ See [Configuration](configuration.md) for full env-var precedence and CI/CD setu
 | `history --show-all` | Show full Q&A content (not preview) | `notebooklm history --show-all` |
 | `history --no-truncate` | Disable the 50-char preview cap on the Question/Answer columns in the table view (the existing `-l/--limit` flag is unchanged: it caps the number of Q&A turns fetched server-side) | `notebooklm history --no-truncate` |
 
+Setting just one of `configure --persona` / `--response-length` **merges** with the current settings — the field you omit is preserved, not reset. A bare `configure` with no flags resets all custom chat settings to their defaults. (A `--mode` preset cannot be combined with `--persona`/`--response-length`.)
+
 ### Source Commands (`notebooklm source <cmd>`)
 
 Supported source types: URLs, YouTube videos, files (PDF, text, Markdown, Word, audio, video, images), Google Drive documents, and pasted text.
@@ -228,7 +230,7 @@ Language-aware generate commands (`audio`, `video`, `cinematic-video`, `report`,
 | Command | Arguments | Type-specific options | Example |
 |---------|-----------|-----------------------|---------|
 | `audio [description]` | Instructions | `--format [deep-dive\|brief\|critique\|debate]`, `--length [short\|default\|long]` | `generate audio "Focus on history"` |
-| `video [description]` | Instructions | `--format [explainer\|brief\|cinematic]`, `--style [auto\|custom\|classic\|whiteboard\|kawaii\|anime\|watercolor\|retro-print\|heritage\|paper-craft]`, `--style-prompt TEXT` (required with `--style custom`; rejected with `--format cinematic`) | `generate video "Explainer for kids"` |
+| `video [description]` | Instructions | `--format [explainer\|brief\|cinematic\|short]`, `--style [auto\|custom\|classic\|whiteboard\|kawaii\|anime\|watercolor\|retro-print\|heritage\|paper-craft]` (not for `--format cinematic`/`short`), `--style-prompt TEXT` (required with `--style custom`; rejected with `--format cinematic`/`short`) | `generate video "Explainer for kids"` |
 | `cinematic-video [description]` | Instructions | Alias for `video --format cinematic` | `generate cinematic-video "Documentary about quantum physics"` |
 | `slide-deck [description]` | Instructions | `--format [detailed\|presenter]`, `--length [default\|short]` | `generate slide-deck` |
 | `revise-slide <description>` | Revision instructions | `-a/--artifact <id>` (required), `--slide N` (required) | `generate revise-slide "Move title up" --artifact <id> --slide 0` |
@@ -1103,9 +1105,9 @@ notebooklm generate video [description] [OPTIONS]
 
 **Options:**
 - `-n, --notebook ID` - Notebook ID (uses current if not set)
-- `--format [explainer|brief|cinematic]` - Video format
-- `--style [auto|custom|classic|whiteboard|kawaii|anime|watercolor|retro-print|heritage|paper-craft]` - Visual style
-- `--style-prompt TEXT` - Custom visual style prompt (required when `--style custom`; rejected with `--format cinematic`)
+- `--format [explainer|brief|cinematic|short]` - Video format (`short` is a vertical short-form video with a fixed style)
+- `--style [auto|custom|classic|whiteboard|kawaii|anime|watercolor|retro-print|heritage|paper-craft]` - Visual style (not supported with `--format cinematic` or `short`)
+- `--style-prompt TEXT` - Custom visual style prompt (required when `--style custom`; rejected with `--format cinematic` or `short`)
 - `--language LANG` - Output language (precedence: `--language` > `NOTEBOOKLM_HL` env > config > `'en'`)
 - `-s, --source ID` - Limit to specific source IDs (repeatable, uses all if not specified)
 - `--wait / --no-wait` - Wait for completion (default: `--no-wait`)

@@ -99,7 +99,7 @@ Most public methods (`client.notebooks.list()`, `client.sources.rename()`,
                                  v
 +----------------------------------------------------------------+
 | NotebookLMClient.<feature>.<method>()                          |
-|   feature API / service builds params and chooses RPCMethod   |
+|   feature API / service builds params and chooses RPCMethod    |
 +----------------------------------------------------------------+
                                  |
                                  v
@@ -125,7 +125,7 @@ Most public methods (`client.notebooks.list()`, `client.sources.rename()`,
                                  |
                                  v
 +----------------------------------------------------------------+
-| ADR-0009 middleware chain                                       |
+| ADR-0009 middleware chain                                      |
 |   Drain -> Metrics -> Sema -> Retry -> AuthRefresh             |
 |   -> ErrInj -> Tracing                                         |
 +----------------------------------------------------------------+
@@ -133,7 +133,7 @@ Most public methods (`client.notebooks.list()`, `client.sources.rename()`,
                                  v
 +----------------------------------------------------------------+
 | MiddlewareChainHost._authed_post_chain_terminal(...)           |
-|   chain leaf — ADR-0014 Rule 4                                  |
+|   chain leaf — ADR-0014 Rule 4                                 |
 +----------------------------------------------------------------+
                                  |
                                  v
@@ -191,7 +191,7 @@ error mapping, so the first ask POST goes through:
                                  |
                                  v
 +----------------------------------------------------------------+
-| ADR-0009 middleware chain                                       |
+| ADR-0009 middleware chain                                      |
 +----------------------------------------------------------------+
                                  |
                                  v
@@ -964,6 +964,7 @@ Per-file index plus the full `src/notebooklm` + `tests` repository tree. The tre
 | `_url_utils.py`, `urls.py` | URL parsing/validation internals and the public URL helper facade |
 | `_sharing_manager.py` | Direct sharing management logic |
 | `_version_check.py` | Dynamic client-side version deprecation guard |
+| `_version_info.py` | Human-facing `version_string()` — package version + short git commit (embedded by `hatch_build.py` at build time, or live `git` from a checkout) |
 | `_chat/notes.py` | Chat-adjacent note saving workflow adapter |
 | `_chat/wire.py` | Streamed-chat wire request construction + response parsing for the chat client |
 | `_chat/transport.py` | Chat-specific error mapping over the shared transport pipeline |
@@ -1016,6 +1017,7 @@ src/notebooklm/
 ├── _logging.py                  # Redaction + correlation logging internals
 ├── _secrets.py                  # Canonical runtime secret registry (cookie names + secure/host umbrellas + token/API-key shapes) the redaction patterns derive from
 ├── _lookup.py                   # unwrap_or_raise — shared single-row-lookup helper for get/get_or_none
+├── _serving.py                  # Shared bootstrap for both HTTP entry points: single-source loopback classification (IPv4-mapped-IPv6-aware) + non-loopback bind guard (mcp/server __main__ + server/_auth all route through it)
 ├── _loop_affinity.py            # Event-loop affinity guard helper (assert_bound_loop free function)
 ├── _loop_bound.py               # LoopBoundPrimitive mixin — template-method set_bound_loop + _on_loop_rebind hook for the loop-bound collaborators
 ├── _error_injection.py          # Synthetic-error env-var resolver + startup guard
@@ -1037,7 +1039,9 @@ src/notebooklm/
 ├── _url_utils.py                # URL validation helpers
 ├── _sharing_manager.py          # Sharing management logic
 ├── _version_check.py            # Deprecation version guard
+├── _version_info.py             # version_string(): version + short git commit
 ├── _research_task_parser.py     # Research task result-type parser
+├── _redact.py                   # Transport-neutral secret/home-path/file-link scrubber (redact(msg, max_length)); shared chokepoint under both mcp/_errors.py and server/_errors.py
 ├── _app/                        # Transport-neutral business-logic layer (CLI/MCP/HTTP adapters share it)
 │   ├── __init__.py              # Re-exports the neutral primitives
 │   ├── artifacts.py             # Click-free artifact core: get/rename/delete/export + poll/wait/retry; kind-aware mind-map dispatch (mind_maps.list for rename, notes.list_mind_maps for delete), get_artifact raises ArtifactNotFoundError, typed Rename/Export results + ArtifactStatusView/status_view neutral status DTO (CLI builds every --json envelope from the typed fields)
@@ -1055,6 +1059,7 @@ src/notebooklm/
 │   ├── mcp_install.py           # Click-free `mcp install <client>` core: supported-client catalog (claude-desktop/claude-code/cursor/windsurf) + per-OS resolve_config_path + uvx build_server_block + merge_server_config read-modify-merge into mcpServers (created/updated/unchanged; never clobbers unrelated keys); UnsupportedClientError. CLI owns the atomic write (cli/mcp_cmd.py)
 │   ├── notebooks.py             # Click-free notebook core: create/delete/rename/describe(summary)/metadata fetch+compute (injected resolve_notebook_id; summary/metadata serializers stay in cli/notebook_cmd.py)
 │   ├── notes.py                 # Click-free note core: create/get/save/rename/delete (typed-facade only — notes.create returns a Note) + content-preserving rename (resolve_note_content); found-flag results map to the CLI NOT_FOUND/exit-1 path (injected notebook/note resolvers)
+│   ├── pagination.py            # Transport-neutral bounded-slice paginate(items, limit, offset) -> (page, {total,offset,has_more}) with bound validation; the shared slice under both the MCP *_list tools and the REST list-route envelope (Option B-lite)
 │   ├── profile.py               # Click-free profile core: gather_profile_list -> ProfileEntry rows (injected list_profiles/resolve_profile/get_storage_path/read_account_metadata), is_protected_profile delete-guard decision, set_default/retarget_default config.json mutators (CLI keeps the locked _atomic_write_config + click.confirm + Rich render)
 │   ├── research.py              # Click-free `research` status/wait core: poll_and_classify -> ResearchStatusResult, ResearchWaitPlan/Result + execute_research_wait (resolver/importer/wait-context injected), validate_research_wait_flags (-> ValidationError); returns typed results only (CLI owns the --json envelope)
 │   ├── resolve.py               # Click-free validate_id + resolve_ref (AmbiguousIdError/Resolution)
@@ -1068,7 +1073,8 @@ src/notebooklm/
 │   ├── source_listing.py        # Click-free `source list` fetch core: fetch_sources (label_filter resolution; label_resolver injected)
 │   ├── source_mutations.py      # Click-free source delete/delete-by-title/rename/refresh/add-drive core: resolvers + SourceMutationError + typed results (validate_id/resolve_source_id injected; confirmer injected)
 │   ├── source_research.py       # Click-free `source add-research` start/wait/import workflow + validate_add_research_flags (importer injected; SourceAddResearchPlan/Result)
-│   └── source_wait.py           # Click-free `source wait` readiness-poll core: execute_source_wait + typed SourceWaitOutcome (wait_context injected)
+│   ├── source_wait.py           # Click-free `source wait` readiness-poll core: execute_source_wait + typed SourceWaitOutcome (wait_context injected)
+│   └── views.py                 # Transport-neutral output-projection views: share_status_view (access/permission/view_level enum→label), source_view (kind/status_label added), ask_result_view (raw_response debug blob stripped); shared by the MCP tools + REST routes so both emit the identical enriched shape (Option B)
 ├── _runtime/                    # Client-runtime subpackage (promoted from flat _runtime_*.py, #1328)
 │   ├── __init__.py              # Re-exports the cluster's public names
 │   ├── auth.py                  # AuthRefreshCoordinator (refresh task + auth-snapshot lock)
@@ -1185,12 +1191,14 @@ src/notebooklm/
 │   └── tools/                   # Per-domain tool modules; each exposes register(mcp) wired by server.register_all
 │       ├── __init__.py          # Tools package marker (no click/rich/cli)
 │       ├── _content_sanity.py   # _annotate_thin_warnings/_thin_content_warning — advisory thin/soft-404 web-page warning over _app.source_content (used by source_wait + source_add batch)
+│       ├── _fileupload.py       # file-transfer slice of the source tools: _broker_upload (signed-URL upload_required) + _decode_upload_b64/_add_bytes (in-channel base64 byte upload for source_upload_bytes) + the shared _add_one plan/execute seam (split from sources.py for the ADR-0008 size budget)
 │       ├── _passthrough.py      # Shared pass-through resolvers (passthrough_notebook_id/passthrough_child_id) for the CLI-shaped _app executors
 │       ├── _preview.py          # title_for_id() — shared id→title lookup for the delete tools' needs_confirmation previews
 │       ├── _studio_items.py     # cross-type Studio plumbing: studio_items (merge notes+artifacts into one items list) + resolve_studio_item (cross-type ref → StudioResolvedItem) for studio_list/studio_rename/studio_delete (split from studio.py for the ADR-0008 size budget)
 │       ├── _studio_download.py  # download plumbing shared by studio.py + _fileroutes.py: _DOWNLOAD_SPECS registry (rebuilt from _app.download) + DownloadType + _resolve_artifact_id / _broker_download / _is_http_transport / _passthrough_download_notebook (split from studio.py for the ADR-0008 size budget)
+│       ├── _waitagg.py          # source-wait outcome aggregation shared by source_wait + source_add_and_wait: _wait_all_sources (concurrent per-source wait) + _aggregate_wait_outcomes (typed SourceWaitOutcome → {ok, ready, timed_out, failed, not_found} + thin-warning annotation) (split from sources.py for the ADR-0008 size budget)
 │       ├── notebooks.py         # notebook_list/create/describe/rename/delete over _app.notebooks
-│       ├── sources.py           # source_list/read/rename/delete/wait/add over _app.source_* (add: url/text/file/youtube via source_add, drive via source_mutations)
+│       ├── sources.py           # source_list/read/rename/delete/wait/add over _app.source_* (add: url/text/file/youtube via source_add, drive via source_mutations) + source_add_and_wait (single-mode add + wait composed via _waitagg) + source_upload_bytes (in-channel small-file byte upload via _fileupload)
 │       ├── chat.py              # chat_ask (client.chat.ask + get_history recall + suggest_followups) + chat_configure (_app.chat.execute_configure) + suggest_prompts (client.notebooks.suggest_prompts surface selector)
 │       ├── notes.py             # note_save (create-or-update upsert) over _app.notes; note reading/renaming/deleting fold into the cross-type Studio tools
 │       ├── studio.py            # hosts the Studio tools: studio_list (merges notes+artifacts via _studio_items.studio_items) / generate / status / download (via _studio_download) / rename / retry / get_prompt / studio_delete — both rename and delete are cross-type via _studio_items.resolve_studio_item (note→_app.notes.execute_note_rename/execute_note_delete, artifact→_app.artifacts kind-aware core); enum dispatch over _app.generate + _app.download; stateless poll via _app.artifacts.poll_artifact
@@ -1286,16 +1294,19 @@ src/notebooklm/
     ├── _context.py              # AppState (lifespan-bound client + pending registry) + get_client / get_pending FastAPI dependencies
     ├── _auth.py                 # Bearer-token (constant-time, 401) + loopback-Host (DNS-rebinding guard, 403) dependency for /v1
     ├── _errors.py               # ErrorCategory -> HTTP status table + _redact + the classify-once exception handler emitting {error:{category,message}}
+    ├── _pagination.py           # Opt-in, non-breaking list-route envelope: paginate_envelope(items, key=…, limit, offset, **extra) — default (no limit) returns the full list under its existing key unchanged; ?limit= slices via _app.pagination.paginate + adds a meta:{total,has_more,limit,offset} block (Option B-lite)
     ├── _pending.py              # In-process pending-id registry (per-notebook provenance for poll -> 200-pending vs 404)
     └── routes/                  # Per-resource FastAPI routers; handlers call _app.serialize.to_jsonable directly
         ├── __init__.py          # Aggregates the resource routers for the app factory
         ├── _passthrough.py      # Pass-through resolvers handed to the _app cores (REST works in full ids)
-        ├── notebooks.py         # /v1/notebooks list/get/create/delete
-        ├── sources.py           # /v1/notebooks/{id}/sources list/get/add(url·text·file)/delete + poll-the-resource status
+        ├── notebooks.py         # /v1/notebooks list/get/create/rename(PATCH)/delete + GET /{id}/suggested-prompts (client.notebooks.suggest_prompts; surface→mode map pinned to MCP)
+        ├── sources.py           # /v1/notebooks/{id}/sources list/get/add(url·text·file·drive·batch)/rename(PATCH)/wait/delete + poll-the-resource status
         ├── notes.py             # /v1/notebooks/{id}/notes list/get/create/update(PUT)/delete — thin adapter over client.notes
-        ├── chat.py              # POST /v1/notebooks/{id}/chat — blocking ask (no SSE)
-        ├── artifacts.py         # /v1/notebooks/{id}/artifacts list/generate/poll/download (registry-projected poll; server-generated temp download path)
-        └── share.py             # /v1/notebooks/{id}/share status/public/users/view-level over _app.sharing
+        ├── chat.py              # POST /v1/notebooks/{id}/chat — blocking ask (no SSE) + POST /chat/configure over _app.chat.execute_configure
+        ├── artifacts.py         # /v1/notebooks/{id}/artifacts list/generate/poll/download/rename(PATCH)/retry/delete + GET /{id}/prompt (per-kind generate-option validation pinned to core maps; registry-projected poll; server-generated temp download path)
+        ├── research.py          # /v1/notebooks/{id}/research start(202)/status/cancel/import — split-tool shape over client.research + _app.research.poll_and_classify (poll_id = report_id or task_id)
+        ├── share.py             # /v1/notebooks/{id}/share status/public/users/view-level over _app.sharing
+        └── meta.py              # GET /v1/server/info — version + local auth-health probe (run_auth_check) + opt-in account block; scrubs the on-disk storage path (mirrors MCP server_info)
 ```
 
 ## ADR cross-references
@@ -1315,7 +1326,17 @@ src/notebooklm/
 - [ADR-0013](./adr/0013-composable-session-capabilities.md) — Composable Session Capabilities (the composable session-capability model).
 - [ADR-0014](./adr/0014-feature-local-runtime-adapters.md) — Feature-local runtime adapters (Accepted; features receive direct collaborators instead of `Session`).
 - [ADR-0015](./adr/0015-json-envelope-contract-for-post-parse-click-exceptions.md) — Typed JSON error envelope for post-parse CLI failures (Accepted).
+- [ADR-0016](./adr/0016-auth-identity-and-core-logger-compatibility.md) — Auth identity + core logger compatibility (Accepted).
+- [ADR-0017](./adr/0017-public-facade-private-implementation.md) — Public-facade / private-implementation re-export convention (Accepted).
+- [ADR-0018](./adr/0018-deprecation-strategy.md) — Deprecation strategy (Accepted).
+- [ADR-0019](./adr/0019-error-and-return-contract.md) — Error-and-return contract for the public API (Accepted; the breaking half shipped in v0.8.0).
+- [ADR-0020](./adr/0020-sealed-async-result-types.md) — Sealed async result types for artifact generation (Accepted).
 - [ADR-0021](./adr/0021-transport-neutral-app-layer.md) — Transport-neutral application layer (`_app/`) (Accepted; boundary enforced by `tests/_guardrails/test_app_boundary.py`, classify↔error_handler agreement by `tests/_guardrails/test_classify_error_handler_consistency.py`).
+- [ADR-0022](./adr/0022-regenerable-baselines.md) — Regenerable test baselines (Accepted).
+- [ADR-0023](./adr/0023-master-token-headless-auth.md) — Master-token headless auth (Accepted; the L4 unattended re-mint path, `[headless]` extra).
+- [ADR-0024](./adr/0024-mcp-remote-file-transfer.md) — Remote-MCP file transfer via signed-URL side-channel (Accepted).
+- [ADR-0025](./adr/0025-mcp-tool-granularity.md) — MCP tool granularity (Accepted).
+- [ADR-0026](./adr/0026-mcp-studio-surface.md) — MCP Studio surface — notes + artifacts unified (Accepted).
 
 ## See also
 

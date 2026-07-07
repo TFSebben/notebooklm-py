@@ -1,6 +1,6 @@
 [project]
 name = "notebooklm-py"
-version = "0.8.0"
+version = "0.8.0a3"
 description = "Unofficial Python library for automating Google NotebookLM"
 dynamic = ["readme"]
 requires-python = ">=3.10"
@@ -54,7 +54,11 @@ impersonate = ["curl_cffi>=0.11,<1"]
 headless = ["gpsoauth>=1.1.0"]
 # >=3.0: the remote-transport bearer auth (FastMCP(auth=...) + TokenVerifier)
 # landed in fastmcp 3.0; 2.x lacks it and would ImportError in mcp/_auth.py.
-mcp = ["fastmcp>=3.0,<4"]
+# Pinned ==3.4.2: fastmcp 3.4.3 broke the RFC 9728 protected-resource-metadata
+# route (/.well-known/oauth-protected-resource/mcp → 404), which dead-ends
+# claude.ai's remote-connector OAuth discovery ("Couldn't connect to the
+# server"). 3.4.2 is the last-good; lift the pin once a fixed release ships.
+mcp = ["fastmcp==3.4.2"]
 # Optional single-tenant REST server (the third _app adapter, after cli/ and
 # mcp/). EXPERIMENTAL: the /v1 surface may change in a minor release; it is
 # excluded from the public-API compatibility gate. python-multipart is REQUIRED
@@ -130,9 +134,20 @@ replacement = '](https://github.com/teng-lin/notebooklm-py/blob/v$HFPR_VERSION/A
 pattern = '\]\(CONTRIBUTING\.md\)'
 replacement = '](https://github.com/teng-lin/notebooklm-py/blob/v$HFPR_VERSION/CONTRIBUTING.md)'
 
+# Bakes the build commit into _commit.py (see hatch_build.py). Registered on both
+# targets so the commit survives `python -m build` (wheel is built from the sdist).
+[tool.hatch.build.targets.sdist.hooks.custom]
+path = "hatch_build.py"
+
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/notebooklm"]
 force-include = {"SKILL.md" = "notebooklm/data/SKILL.md", "AGENTS.md" = "notebooklm/data/CODEX.md"}
+# Re-include the gitignored _commit.py when the wheel is built from a
+# carried-forward sdist (the hook only runs from a checkout with .git).
+artifacts = ["src/notebooklm/_commit.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -151,6 +166,7 @@ addopts = "--ignore=tests/e2e"
 timeout = 60
 markers = [
     "e2e: end-to-end tests requiring authentication (run with pytest tests/e2e -m e2e)",
+    "live_chat_ask: E2E live chat ask tests monitored for CI coverage floors",
     "variants: parameter variant tests (skip to save quota)",
     "readonly: read-only tests against user's test notebook",
     "impersonate_smoke: minimal live smoke run under NOTEBOOKLM_TRANSPORT=curl_cffi in the nightly (read/ask/upload/download — one per transport-critical op)",

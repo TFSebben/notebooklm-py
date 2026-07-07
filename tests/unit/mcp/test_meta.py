@@ -9,7 +9,11 @@ honors.
 
 from __future__ import annotations
 
+import contextlib
 import json
+from collections.abc import AsyncIterator
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -17,8 +21,12 @@ import pytest
 # Skip cleanly when the `mcp` extra (fastmcp) is absent; see conftest.py.
 pytest.importorskip("fastmcp")
 
-from notebooklm import __version__  # noqa: E402 - after importorskip guard
+from fastmcp import Client  # noqa: E402 - after importorskip guard
+
+from notebooklm._version_info import version_string  # noqa: E402 - after importorskip guard
 from notebooklm.exceptions import RPCError  # noqa: E402 - after importorskip guard
+from notebooklm.mcp.server import create_server  # noqa: E402 - after importorskip guard
+from notebooklm.mcp.tools import meta as meta_tool  # noqa: E402 - after importorskip guard
 from notebooklm.types import (  # noqa: E402 - after importorskip guard
     AccountLimits,
     UserSettings,
@@ -54,7 +62,7 @@ def _write_authed_storage() -> None:
 async def test_server_info_reports_version(mcp_call, mock_client, tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("NOTEBOOKLM_HOME", str(tmp_path))
     result = await mcp_call("server_info")
-    assert result.structured_content["version"] == __version__
+    assert result.structured_content["version"] == version_string()
     assert result.structured_content["server"] == "notebooklm"
 
 
@@ -114,6 +122,113 @@ async def test_server_info_does_not_leak_absolute_storage_path(
     # The non-sensitive identity fields are still present.
     assert "profile" in auth
     assert "authenticated" in auth
+
+
+async def test_server_info_profile_is_resolved_not_null(
+    mcp_call, mock_client, tmp_path, monkeypatch
+) -> None:
+    """``auth.profile`` reports the resolved profile, never ``None`` (#1790).
+
+    The MCP server never sets a module-level active profile, so the field used to
+    come back ``null`` even on a healthy session — undercutting the docstring that
+    points diagnostics at it. It must instead name the profile the auth probe ran
+    against (``"default"`` when no named profile is configured).
+    """
+    from notebooklm import paths
+
+    monkeypatch.setenv("NOTEBOOKLM_HOME", str(tmp_path))
+    monkeypatch.delenv("NOTEBOOKLM_PROFILE", raising=False)
+    monkeypatch.setattr(paths, "_active_profile", None)
+    result = await mcp_call("server_info")
+    assert result.structured_content["auth"]["profile"] == "default"
+
+
+async def test_server_info_profile_reflects_named_profile(
+    mcp_call, mock_client, tmp_path, monkeypatch
+) -> None:
+    """A named profile (via ``NOTEBOOKLM_PROFILE``) is surfaced in ``auth.profile``."""
+    from notebooklm import paths
+
+    monkeypatch.setenv("NOTEBOOKLM_HOME", str(tmp_path))
+    monkeypatch.setenv("NOTEBOOKLM_PROFILE", "work")
+    monkeypatch.setattr(paths, "_active_profile", None)
+    result = await mcp_call("server_info")
+    assert result.structured_content["auth"]["profile"] == "work"
+
+
+async def test_server_info_uses_bound_profile_for_probe(mock_client, tmp_path, monkeypatch) -> None:
+    """``create_server(profile=X)`` makes server_info probe that same profile (#1791)."""
+    from notebooklm import paths
+
+    seen: dict[str, Any] = {}
+
+    async def _fake_run(plan: Any, *, read_env_auth_json: Any) -> Any:
+        seen["profile"] = plan.profile
+        seen["storage_path"] = plan.storage_path
+        return SimpleNamespace(
+            all_passed=True,
+            checks={
+                "storage_exists": True,
+                "json_valid": True,
+                "cookies_present": True,
+                "sid_cookie": True,
+            },
+        )
+
+    @contextlib.asynccontextmanager
+    async def factory() -> AsyncIterator[MagicMock]:
+        yield mock_client
+
+    monkeypatch.setenv("NOTEBOOKLM_HOME", str(tmp_path))
+    monkeypatch.delenv("NOTEBOOKLM_PROFILE", raising=False)
+    monkeypatch.setattr(paths, "_active_profile", None)
+    monkeypatch.setattr(meta_tool, "run_auth_check", _fake_run)
+
+    async with Client(create_server(profile="work", client_factory=factory)) as client:
+        result = await client.call_tool("server_info")
+
+    assert result.structured_content["auth"]["profile"] == "work"
+    assert seen == {"profile": "work", "storage_path": paths.get_storage_path("work")}
+    assert paths.get_active_profile() is None
+
+
+async def test_server_info_locks_resolved_profile_for_lifespan(
+    mock_client, tmp_path, monkeypatch
+) -> None:
+    """``profile=None`` resolves once at startup, matching the lifespan-bound client."""
+    from notebooklm import paths
+
+    seen: dict[str, Any] = {}
+
+    async def _fake_run(plan: Any, *, read_env_auth_json: Any) -> Any:
+        seen["profile"] = plan.profile
+        seen["storage_path"] = plan.storage_path
+        return SimpleNamespace(
+            all_passed=True,
+            checks={
+                "storage_exists": True,
+                "json_valid": True,
+                "cookies_present": True,
+                "sid_cookie": True,
+            },
+        )
+
+    @contextlib.asynccontextmanager
+    async def factory() -> AsyncIterator[MagicMock]:
+        yield mock_client
+
+    monkeypatch.setenv("NOTEBOOKLM_HOME", str(tmp_path))
+    monkeypatch.setenv("NOTEBOOKLM_PROFILE", "work")
+    monkeypatch.setattr(paths, "_active_profile", None)
+    monkeypatch.setattr(meta_tool, "run_auth_check", _fake_run)
+
+    async with Client(create_server(client_factory=factory)) as client:
+        monkeypatch.setenv("NOTEBOOKLM_PROFILE", "other")
+        result = await client.call_tool("server_info")
+
+    assert result.structured_content["auth"]["profile"] == "work"
+    assert seen == {"profile": "work", "storage_path": paths.get_storage_path("work")}
+    assert paths.get_active_profile() is None
 
 
 async def test_server_info_default_omits_account(
@@ -193,7 +308,7 @@ async def test_server_info_include_account_degrades_on_rpc_error(
     assert account["email"] == "alice@example.com"
     assert account["authuser"] == 1
     # The diagnostic stays useful: version + auth block survive the degradation.
-    assert result.structured_content["version"] == __version__
+    assert result.structured_content["version"] == version_string()
     assert result.structured_content["auth"]["authenticated"] is True
 
 

@@ -86,6 +86,38 @@ def test_manifest_has_win32_command_override() -> None:
     )
 
 
+def test_manifest_version_matches_package_version() -> None:
+    """The bundled manifest version must track the package version.
+
+    ``.github/workflows/publish-mcpb.yml`` builds the ``.mcpb`` from this
+    manifest and attaches it to the GitHub Release, asserting there that the
+    manifest, the ``vX.Y.Z`` tag, and ``pyproject.toml`` all agree. This is the
+    commit-time half of that guard: it fails the moment a version bump advances
+    ``pyproject.toml`` without also bumping ``desktop-extension/manifest.json``,
+    so the shipped bundle can never carry a stale version.
+
+    Compared against ``pyproject.toml`` (the source of truth the release bumps),
+    not ``notebooklm.__version__``: the latter is *installed* dist metadata
+    (``importlib.metadata.version``), which lags an editable checkout until
+    reinstall — so it could false-pass locally on a forgotten manifest bump.
+    ``tomllib``/``tomli`` mirrors ``test_version_pyproject_sync.py`` and keeps
+    the check working on the 3.10 matrix leg.
+    """
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # pragma: no cover - exercised on Python <3.11
+        import tomli as tomllib
+
+    pyproject = _REPO_ROOT / "pyproject.toml"
+    pyproject_version = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
+    manifest_version = json.loads(_MANIFEST.read_text(encoding="utf-8"))["version"]
+    assert manifest_version == pyproject_version, (
+        f"desktop-extension/manifest.json version ({manifest_version!r}) is out of "
+        f"sync with pyproject.toml ({pyproject_version!r}); bump the manifest in the "
+        f"same commit as the package version."
+    )
+
+
 def test_manifest_describes_this_package_not_the_competitor() -> None:
     data = json.loads(_MANIFEST.read_text(encoding="utf-8"))
     # Name is OUR server, not the competitor's distribution.
@@ -182,6 +214,74 @@ def test_build_command_no_extra_argv() -> None:
     assert cmd == ["/opt/uvx", "--from", "notebooklm-py[mcp]", "notebooklm-mcp"]
 
 
+def test_is_prerelease() -> None:
+    run_server = _load_run_server()
+    # Canonical pre-releases (what this project actually produces).
+    assert run_server._is_prerelease("0.8.0a1")
+    assert run_server._is_prerelease("0.8.0b2")
+    assert run_server._is_prerelease("1.2.3rc10")
+    # Broader PEP 440 pre-release / development forms (defense in depth).
+    assert run_server._is_prerelease("0.8.0a1.dev0")
+    assert run_server._is_prerelease("0.8.0.dev1")
+    assert run_server._is_prerelease("0.8.0alpha1")
+    assert run_server._is_prerelease("0.8.0beta2")
+    assert run_server._is_prerelease("0.8.0a")
+    # Stable and post-releases are NOT pre-releases.
+    assert not run_server._is_prerelease("0.8.0")
+    assert not run_server._is_prerelease("1.2.3")
+    assert not run_server._is_prerelease("1.2.3.post1")
+
+
+def test_build_command_pins_prerelease_version() -> None:
+    """A pre-release bundle pins its exact version. The explicit ``==`` pre-release
+    pin is enough for uv to resolve it — no ``--prerelease`` flag (which would
+    loosen transitive dependency resolution)."""
+    run_server = _load_run_server()
+    cmd = run_server.build_command("/usr/bin/uvx", ["--transport", "http"], "0.8.0a1")
+    assert cmd == [
+        "/usr/bin/uvx",
+        "--from",
+        "notebooklm-py[mcp]==0.8.0a1",
+        "notebooklm-mcp",
+        "--transport",
+        "http",
+    ]
+
+
+def test_build_command_stable_version_stays_unpinned() -> None:
+    """A stable bundle stays unpinned so it tracks the latest stable server."""
+    run_server = _load_run_server()
+    cmd = run_server.build_command("/opt/uvx", [], "0.8.0")
+    assert cmd == ["/opt/uvx", "--from", "notebooklm-py[mcp]", "notebooklm-mcp"]
+
+
+def test_bundle_version_matches_manifest() -> None:
+    """``_bundle_version`` reads the version from the sibling manifest.json."""
+    run_server = _load_run_server()
+    manifest = json.loads(_MANIFEST.read_text(encoding="utf-8"))
+    assert run_server._bundle_version() == manifest["version"]
+
+
+def test_bundle_version_falls_back_to_none_on_bad_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Valid-JSON-but-not-an-object, missing, and malformed manifests → None,
+    never a crash (the launcher must degrade gracefully)."""
+    run_server = _load_run_server()
+    monkeypatch.setattr(run_server, "__file__", str(tmp_path / "run_server.py"))
+
+    # No manifest beside the launcher.
+    assert run_server._bundle_version() is None
+
+    # Valid JSON, but a list (not an object) — .get() would AttributeError.
+    (tmp_path / "manifest.json").write_text("[]", encoding="utf-8")
+    assert run_server._bundle_version() is None
+
+    # Malformed JSON.
+    (tmp_path / "manifest.json").write_text("{not json", encoding="utf-8")
+    assert run_server._bundle_version() is None
+
+
 def test_main_errors_to_stderr_when_uvx_absent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -245,7 +345,14 @@ def test_run_server_does_not_print_to_stdout_on_success_path(
     assert excinfo.value.code == 0
 
     cmd = captured_cmd["cmd"]
-    assert cmd[1:5] == ["--from", "notebooklm-py[mcp]", "notebooklm-mcp", "--profile"]
+    # The exact --from spec depends on whether this bundle is a pre-release
+    # (pinned to its exact version) or stable (unpinned); assert the
+    # version-agnostic invariants: the console script runs and the forwarded
+    # argv (``--profile x``) is passed through intact.
+    assert "notebooklm-mcp" in cmd
+    assert cmd[-2:] == ["--profile", "x"]
+    from_idx = cmd.index("--from")
+    assert cmd[from_idx + 1].startswith("notebooklm-py[mcp]")
     # stdio is passed through cleanly (critical for JSON-RPC).
     import sys
 

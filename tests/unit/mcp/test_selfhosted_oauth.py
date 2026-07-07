@@ -9,7 +9,10 @@ register→authorize→login→token→verify flow.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import re
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -36,6 +39,7 @@ from notebooklm.mcp._oauth import (  # noqa: E402
     build_oauth_provider,
     get_oauth_config,
 )
+from notebooklm.mcp.server import create_server  # noqa: E402
 
 _PW = "a-strong-random-password-1234567890"
 
@@ -125,6 +129,30 @@ def test_config_ok_with_state_path(_clear_env: None, monkeypatch: pytest.MonkeyP
     assert cfg.state_path.parts[-3:] == ("profiles", "server", "oauth_state.json")
 
 
+def test_config_state_path_honors_profile_without_env(
+    _clear_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1765: state_path resolves through the canonical profile resolver. An explicit
+    profile (the --profile flag) is honored even when NOTEBOOKLM_PROFILE is unset (the
+    old code read env only and ignored it), and with NOTEBOOKLM_HOME also unset it still
+    resolves to a real path under the default home instead of silently going None."""
+    monkeypatch.setenv(OAUTH_PASSWORD_ENV, _PW)
+    monkeypatch.setenv(OAUTH_BASE_URL_ENV, "https://host.example.com")
+    cfg = get_oauth_config(profile="work")  # no HOME/PROFILE env set
+    assert cfg is not None and cfg.state_path is not None
+    assert cfg.state_path.parts[-3:] == ("profiles", "work", "oauth_state.json")
+
+
+def test_config_rejects_malformed_profile(
+    _clear_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A path-traversal profile name fails clean (SystemExit), not a raw traceback."""
+    monkeypatch.setenv(OAUTH_PASSWORD_ENV, _PW)
+    monkeypatch.setenv(OAUTH_BASE_URL_ENV, "https://host.example.com")
+    with pytest.raises(SystemExit):
+        get_oauth_config(profile="../escape")
+
+
 # --------------------------------------------------------------------------- routes / DCR
 def test_provider_routes_include_login_and_register() -> None:
     p = _provider()
@@ -140,6 +168,91 @@ def test_metadata_advertises_registration_endpoint() -> None:
     with TestClient(app) as c:
         meta = c.get("/.well-known/oauth-authorization-server").json()
     assert meta.get("registration_endpoint")  # DCR enabled → claude.ai can register
+
+
+# ------------------------------------------------- connector discovery (RFC 9728)
+# These drive the FULL FastMCP ``http_app()`` — not just the AS provider routes —
+# because the protected-resource-metadata endpoint is mounted by the MCP app, and
+# that is exactly what fastmcp 3.4.3 regressed: its Host/Origin guard rejected any
+# request whose Host wasn't its (localhost/``testserver``) allowlist — including
+# the deployment's own public origin — so claude.ai's discovery fetch got a
+# non-200 and dead-ended ("Couldn't connect to the server"). pyproject pins
+# ``fastmcp==3.4.2``; these fail loudly (under a realistic Host) if a float breaks it.
+_HOST = "host.example.com"
+
+
+def _oauth_http_app():
+    """The real FastMCP ``http_app()`` in OAuth mode, client bound to a stub."""
+
+    @contextlib.asynccontextmanager
+    async def factory():
+        yield MagicMock()
+
+    server = create_server(client_factory=factory, auth=build_auth(None, _provider()))
+    return server.http_app()
+
+
+def _path(url: str) -> str:
+    """Strip the public origin → the route path the in-process TestClient hits."""
+    return url.split(_HOST, 1)[-1]
+
+
+# The connector reaches the server under its OWN public origin (behind the
+# tunnel), NOT ``testserver``. This Host header is load-bearing: fastmcp 3.4.3's
+# Host/Origin guard allowlisted ``testserver``/localhost but not the deployment
+# origin, so it rejected the real request (→ 421) while a default TestClient Host
+# sailed through. Every request below sends the realistic Host so the guard is
+# actually exercised.
+_H = {"host": _HOST}
+
+
+def test_mcp_401_resource_metadata_is_fetchable() -> None:
+    """The ``/mcp`` 401 must advertise a resource-metadata URL that returns 200
+    when fetched under the deployment's own Host.
+
+    Precise regression guard for fastmcp 3.4.3: its Host-protection returned a
+    non-200 (421/404) for ``/.well-known/oauth-protected-resource/mcp`` under the
+    real connector Host, so claude.ai could not discover the auth server
+    ("Couldn't connect to the server"). pyproject pins ``fastmcp==3.4.2``.
+    """
+    with TestClient(_oauth_http_app()) as c:
+        r = c.post(
+            "/mcp",
+            headers={**_H, "Accept": "application/json, text/event-stream"},
+            json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        )
+        assert r.status_code == 401, f"/mcp under Host={_HOST!r} -> {r.status_code}"
+        m = re.search(r'resource_metadata="([^"]+)"', r.headers.get("www-authenticate", ""))
+        assert m, f"no resource_metadata in WWW-Authenticate: {r.headers.get('www-authenticate')!r}"
+        meta = c.get(_path(m.group(1)), headers=_H)
+        assert meta.status_code == 200, (
+            f"{_path(m.group(1))} under Host={_HOST!r} -> {meta.status_code}; the 401 "
+            "points at an unreachable metadata doc (fastmcp host-guard regression?)"
+        )
+        assert meta.json().get("authorization_servers")
+
+
+def test_dynamic_client_registration_succeeds() -> None:
+    """claude.ai registers a client via DCR before connecting; ``/register`` → 201
+    under the deployment's own Host (guards the same fastmcp 3.4.3 host regression)."""
+    with TestClient(_oauth_http_app()) as c:
+        meta = c.get("/.well-known/oauth-authorization-server", headers=_H)
+        assert meta.status_code == 200, f"AS metadata under Host={_HOST!r} -> {meta.status_code}"
+        reg = c.post(
+            _path(meta.json()["registration_endpoint"]),
+            headers=_H,
+            json={
+                "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"],
+                "grant_types": ["authorization_code", "refresh_token"],
+                "response_types": ["code"],
+                "token_endpoint_auth_method": "client_secret_post",
+                "client_name": "test",
+            },
+        )
+        assert reg.status_code == 201, (
+            f"register under Host={_HOST!r} -> {reg.status_code}: {reg.text}"
+        )
+        assert reg.json().get("client_id")
 
 
 # --------------------------------------------------------------------------- DCR cap
@@ -406,24 +519,13 @@ def test_throttle_separates_buckets_by_cf_header_when_trusted() -> None:
             assert r.status_code == 401  # never 429 — each IP has only one failure
 
 
-# --------------------------------------------------------------------------- #1761 startup warning
-def test_build_oauth_provider_warns_when_state_not_persisted(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """OAuth on but state_path None → one startup WARNING naming the persistence env vars."""
-    cfg = OAuthConfig(password=_PW, base_url="https://h.example.com", state_path=None)
-    with caplog.at_level(logging.WARNING, logger="notebooklm.mcp._oauth"):
-        provider = build_oauth_provider(cfg)
-    assert isinstance(provider, SelfHostedOAuthProvider)
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    assert "NOTEBOOKLM_HOME" in warnings[0].message and "NOTEBOOKLM_PROFILE" in warnings[0].message
-
-
-def test_build_oauth_provider_no_warn_when_state_persisted(
+# --------------------------------------------------------------------------- build_oauth_provider
+def test_build_oauth_provider_wires_state_without_warning(
     tmp_path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """With a state_path set, the non-persistence warning must NOT fire."""
+    """#1765: state_path now always resolves (get_oauth_config binds it to the active
+    profile dir), so build_oauth_provider just wires it through — the old "state not
+    persisted" startup warning was removed and must not fire."""
     cfg = OAuthConfig(
         password=_PW, base_url="https://h.example.com", state_path=tmp_path / "oauth_state.json"
     )

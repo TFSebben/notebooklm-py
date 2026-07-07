@@ -381,9 +381,12 @@ def generate_audio(
 @click.option(
     "--format",
     "video_format",
-    type=click.Choice(["explainer", "brief", "cinematic"]),
+    type=click.Choice(["explainer", "brief", "cinematic", "short"]),
     default="explainer",
-    help="Video format; 'cinematic' uses Veo 3 footage (default: explainer)",
+    help=(
+        "Video format; 'cinematic' uses Veo 3 footage, 'short' is a vertical "
+        "short-form video (default: explainer)"
+    ),
 )
 @click.option(
     "--style",
@@ -402,7 +405,10 @@ def generate_audio(
         ]
     ),
     default="auto",
-    help="Visual style (default: auto). Use 'custom' with --style-prompt.",
+    help=(
+        "Visual style (default: auto). Use 'custom' with --style-prompt. "
+        "Not supported for --format cinematic or short (fixed style)."
+    ),
 )
 @click.option("--style-prompt", default=None, help="Custom visual style prompt")
 @language_option

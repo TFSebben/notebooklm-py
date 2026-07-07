@@ -31,11 +31,12 @@ from typing import cast
 from fastapi import APIRouter, Depends, FastAPI, Request, Response
 
 from ..client import NotebookLMClient
+from ..paths import get_active_profile, resolve_profile, set_active_profile
 from ._auth import require_auth
 from ._context import AppState
 from ._errors import http_error_response, install_exception_handlers
 from ._pending import PendingRegistry
-from .routes import artifacts, chat, notebooks, notes, share, sources
+from .routes import artifacts, chat, meta, notebooks, notes, research, share, sources
 from .routes.sources import MAX_UPLOAD_BYTES
 
 __all__ = ["SERVER_NAME", "create_app"]
@@ -48,38 +49,48 @@ SERVER_NAME = "notebooklm-server"
 ClientFactory = Callable[[], AbstractAsyncContextManager[NotebookLMClient]]
 
 
-def _default_factory() -> AbstractAsyncContextManager[NotebookLMClient]:
+def _default_factory(profile: str | None = None) -> AbstractAsyncContextManager[NotebookLMClient]:
     # ``from_storage`` returns a dual awaitable / async-context-manager; we use
     # only the async-context-manager protocol (the canonical, non-deprecated path).
     return cast(
         "AbstractAsyncContextManager[NotebookLMClient]",
-        NotebookLMClient.from_storage(),
+        NotebookLMClient.from_storage(profile=profile),
     )
 
 
-def create_app(*, client_factory: ClientFactory | None = None) -> FastAPI:
+def create_app(
+    *, profile: str | None = None, client_factory: ClientFactory | None = None
+) -> FastAPI:
     """Build the FastAPI application.
 
     Args:
+        profile: Auth profile bound by the default factory (``from_storage(profile=)``).
+            ``None`` resolves the active profile. Also drives process-wide profile
+            resolution for diagnostics such as ``/v1/server/info``.
         client_factory: Test seam — a zero-arg callable returning an async
             context manager that yields a client. Defaults to
-            ``NotebookLMClient.from_storage()``.
+            ``NotebookLMClient.from_storage(profile=profile)``.
 
     Returns:
         A configured :class:`~fastapi.FastAPI` app whose lifespan binds exactly
         one client, with the ``/v1`` resource routers (auth-gated) and a public
         ``/healthz`` mounted.
     """
-    factory = client_factory or _default_factory
+    factory = client_factory or (lambda: _default_factory(profile))
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        async with factory() as client:
-            app.state.notebooklm = AppState(client=client, pending=PendingRegistry())
-            try:
-                yield
-            finally:
-                app.state.notebooklm = None
+        previous_profile = get_active_profile()
+        set_active_profile(resolve_profile(profile))
+        try:
+            async with factory() as client:
+                app.state.notebooklm = AppState(client=client, pending=PendingRegistry())
+                try:
+                    yield
+                finally:
+                    app.state.notebooklm = None
+        finally:
+            set_active_profile(previous_profile)
 
     app = FastAPI(
         title=SERVER_NAME,
@@ -102,19 +113,26 @@ def create_app(*, client_factory: ClientFactory | None = None) -> FastAPI:
         # route reads/parses the body — Starlette's multipart parser spools file
         # parts to disk unbounded, so a post-parse check is too late (the body is
         # already on disk). This Content-Length pre-check is the actual disk-
-        # exhaustion mitigation. Residual: a chunked request (no Content-Length)
-        # bypasses it, and Starlette still spools the full part before the upload
-        # handler's per-chunk check can reject it — so that per-chunk check caps
-        # only the copy into our own temp file, not Starlette's spool. Acceptable
-        # for a single-user loopback-only server; revisit if ever exposed wider.
-        # Nothing legitimate exceeds the upload cap, so applying it to every
-        # request is safe.
+        # exhaustion mitigation. Nothing legitimate exceeds the upload cap, so
+        # applying it to every request is safe.
+        content_type = request.headers.get("content-type", "")
+        is_multipart = content_type.lstrip().lower().startswith("multipart/form-data")
         content_length = request.headers.get("content-length")
-        if content_length is not None:
+        if content_length is None:
+            # A chunked (no-Content-Length) multipart upload would otherwise let
+            # Starlette spool the full part to disk before any per-chunk cap runs.
+            # Require an up-front declared length for multipart so the size can be
+            # bounded before a byte is spooled; other verbs (GET/JSON) are
+            # unaffected. Route through the shared projector for a uniform envelope.
+            if is_multipart:
+                return http_error_response(411, "Content-Length is required for multipart uploads")
+        else:
             try:
                 declared = int(content_length)
             except ValueError:
                 declared = -1
+            if declared < 0 and is_multipart:
+                return http_error_response(411, "A valid Content-Length is required for uploads")
             if declared > MAX_UPLOAD_BYTES:
                 # Route through the shared projector so the envelope shape +
                 # lowercase category match every other error response.
@@ -133,7 +151,9 @@ def create_app(*, client_factory: ClientFactory | None = None) -> FastAPI:
     v1.include_router(notes.router)
     v1.include_router(chat.router)
     v1.include_router(artifacts.router)
+    v1.include_router(research.router)
     v1.include_router(share.router)
+    v1.include_router(meta.router)
     app.include_router(v1)
 
     return app

@@ -23,6 +23,11 @@ from notebooklm.exceptions import (  # noqa: E402 - after importorskip guard
     ChatError,
     RPCError,
 )
+from notebooklm.types import (  # noqa: E402 - after importorskip guard
+    ChatGoal,
+    ChatResponseLength,
+    ChatSettings,
+)
 
 from .conftest import AsyncMock  # noqa: E402 - after importorskip guard
 
@@ -62,6 +67,7 @@ async def test_chat_ask(mcp_call, mock_client) -> None:
         return_value=FakeAskResult(answer="42", conversation_id=CONV_ID)
     )
     result = await mcp_call("chat_ask", {"notebook": NB_ID, "question": "what?"})
+    assert result.structured_content["notebook_id"] == NB_ID
     assert result.structured_content["answer"] == "42"
     assert result.structured_content["conversation_id"] == CONV_ID
     mock_client.chat.ask.assert_awaited_once_with(
@@ -89,7 +95,9 @@ async def test_chat_ask_resolves_notebook_by_name(mcp_call, mock_client) -> None
     mock_client.chat.ask = AsyncMock(
         return_value=FakeAskResult(answer="hi", conversation_id=CONV_ID)
     )
-    await mcp_call("chat_ask", {"notebook": "My Notebook", "question": "q"})
+    result = await mcp_call("chat_ask", {"notebook": "My Notebook", "question": "q"})
+    # Asked by NAME → the response echoes the resolved canonical id (#1808).
+    assert result.structured_content["notebook_id"] == NB_ID
     mock_client.chat.ask.assert_awaited_once_with(NB_ID, "q", source_ids=None, conversation_id=None)
 
 
@@ -111,11 +119,22 @@ async def test_chat_ask_source_ids_list(mcp_call, mock_client) -> None:
     mock_client.chat.ask = AsyncMock(
         return_value=FakeAskResult(answer="42", conversation_id=CONV_ID)
     )
-    await mcp_call(
+    result = await mcp_call(
         "chat_ask",
         {"notebook": NB_ID, "question": "what?", "source_ids": [_SRC_A, _SRC_B]},
     )
     assert mock_client.chat.ask.await_args.kwargs["source_ids"] == [_SRC_A, _SRC_B]
+    # A source-scoped call echoes the resolved canonical source_ids (#1808).
+    assert result.structured_content["source_ids"] == [_SRC_A, _SRC_B]
+
+
+async def test_chat_ask_unscoped_omits_source_ids_echo(mcp_call, mock_client) -> None:
+    """No source scope => no source_ids key in the response (all-sources contract)."""
+    mock_client.chat.ask = AsyncMock(
+        return_value=FakeAskResult(answer="42", conversation_id=CONV_ID)
+    )
+    result = await mcp_call("chat_ask", {"notebook": NB_ID, "question": "what?"})
+    assert "source_ids" not in result.structured_content
 
 
 async def test_chat_ask_source_ids_json_string(mcp_call, mock_client) -> None:
@@ -178,6 +197,7 @@ async def test_chat_ask_recall_only(mcp_call, mock_client) -> None:
         {"question": "q2", "answer": "a2"},
     ]
     # Recall-only echoes the resolved conversation; no answer is produced.
+    assert result.structured_content["notebook_id"] == NB_ID
     assert result.structured_content["conversation_id"] == CONV_ID
     assert "answer" not in result.structured_content
     mock_client.chat.ask.assert_not_awaited()
@@ -459,28 +479,68 @@ async def test_chat_configure_empty_rejected(mcp_call, mock_client) -> None:
     mock_client.chat.configure.assert_not_called()
 
 
-async def test_chat_configure_goal_only_rejected(mcp_call, mock_client) -> None:
+async def test_chat_configure_goal_only_merges(mcp_call, mock_client) -> None:
+    """goal-only is a partial custom write: it now MERGES (preserves length), not rejected (#1751)."""
     mock_client.chat.configure = AsyncMock(return_value=None)
-    with pytest.raises(ToolError) as excinfo:
-        await mcp_call("chat_configure", {"notebook": NB_ID, "goal": "tutor"})
-    assert "Pass BOTH goal and response_length" in str(excinfo.value)
-    mock_client.chat.configure.assert_not_called()
+    mock_client.chat.get_settings = AsyncMock(
+        return_value=ChatSettings(
+            goal=ChatGoal.DEFAULT, response_length=ChatResponseLength.SHORTER, custom_prompt=None
+        )
+    )
+    result = await mcp_call("chat_configure", {"notebook": NB_ID, "goal": "tutor"})
+    sc = result.structured_content
+    assert sc["persona"] == "tutor"
+    assert sc["goal_name"] == "custom"
+    # The omitted response_length is preserved from the current settings (SHORTER).
+    mock_client.chat.configure.assert_awaited_once_with(
+        NB_ID,
+        goal=ChatGoal.CUSTOM,
+        response_length=ChatResponseLength.SHORTER,
+        custom_prompt="tutor",
+    )
 
 
-async def test_chat_configure_length_only_rejected(mcp_call, mock_client) -> None:
+async def test_chat_configure_length_only_merges(mcp_call, mock_client) -> None:
+    """length-only is a partial custom write: it now MERGES (preserves goal+persona) (#1751)."""
     mock_client.chat.configure = AsyncMock(return_value=None)
-    with pytest.raises(ToolError) as excinfo:
-        await mcp_call("chat_configure", {"notebook": NB_ID, "response_length": "longer"})
-    assert "Pass BOTH goal and response_length" in str(excinfo.value)
-    mock_client.chat.configure.assert_not_called()
+    mock_client.chat.get_settings = AsyncMock(
+        return_value=ChatSettings(
+            goal=ChatGoal.CUSTOM,
+            response_length=ChatResponseLength.DEFAULT,
+            custom_prompt="keep me",
+        )
+    )
+    result = await mcp_call("chat_configure", {"notebook": NB_ID, "response_length": "longer"})
+    sc = result.structured_content
+    # Delta reporting: only the field this call set is echoed.
+    assert sc["response_length"] == "longer"
+    assert sc["persona"] is None
+    # The omitted goal/persona is preserved from the current settings.
+    mock_client.chat.configure.assert_awaited_once_with(
+        NB_ID,
+        goal=ChatGoal.CUSTOM,
+        response_length=ChatResponseLength.LONGER,
+        custom_prompt="keep me",
+    )
 
 
-async def test_chat_configure_length_default_only_rejected(mcp_call, mock_client) -> None:
+async def test_chat_configure_length_default_only_merges(mcp_call, mock_client) -> None:
+    """response_length="default" alone is an explicit setting → partial merge, not rejected."""
     mock_client.chat.configure = AsyncMock(return_value=None)
-    with pytest.raises(ToolError) as excinfo:
-        await mcp_call("chat_configure", {"notebook": NB_ID, "response_length": "default"})
-    assert "Pass BOTH goal and response_length" in str(excinfo.value)
-    mock_client.chat.configure.assert_not_called()
+    mock_client.chat.get_settings = AsyncMock(
+        return_value=ChatSettings(
+            goal=ChatGoal.LEARNING_GUIDE,
+            response_length=ChatResponseLength.LONGER,
+            custom_prompt=None,
+        )
+    )
+    await mcp_call("chat_configure", {"notebook": NB_ID, "response_length": "default"})
+    mock_client.chat.configure.assert_awaited_once_with(
+        NB_ID,
+        goal=ChatGoal.LEARNING_GUIDE,
+        response_length=ChatResponseLength.DEFAULT,
+        custom_prompt=None,
+    )
 
 
 async def test_chat_configure_empty_goal_only_rejected(mcp_call, mock_client) -> None:
@@ -492,36 +552,40 @@ async def test_chat_configure_empty_goal_only_rejected(mcp_call, mock_client) ->
     mock_client.chat.configure.assert_not_called()
 
 
-async def test_chat_configure_empty_goal_with_length_rejected(mcp_call, mock_client) -> None:
-    """goal: "" + a length is a length-ONLY (partial) write, not a both-supplied call.
+async def test_chat_configure_empty_goal_with_length_merges(mcp_call, mock_client) -> None:
+    """goal: "" + a length is a length-ONLY (partial) write, so it merges (#1751).
 
     Pins ``bool(goal)`` (not ``goal is not None``): an empty goal counts as
-    not-supplied, so pairing it with a response_length is still the partial-reset
-    footgun and must be rejected.
+    not-supplied, so pairing it with a response_length is a length-only partial
+    that preserves the current goal/persona.
     """
     mock_client.chat.configure = AsyncMock(return_value=None)
-    with pytest.raises(ToolError) as excinfo:
-        await mcp_call(
-            "chat_configure", {"notebook": NB_ID, "goal": "", "response_length": "longer"}
+    mock_client.chat.get_settings = AsyncMock(
+        return_value=ChatSettings(
+            goal=ChatGoal.DEFAULT, response_length=ChatResponseLength.DEFAULT, custom_prompt=None
         )
-    assert "Pass BOTH goal and response_length" in str(excinfo.value)
-    mock_client.chat.configure.assert_not_called()
+    )
+    await mcp_call("chat_configure", {"notebook": NB_ID, "goal": "", "response_length": "longer"})
+    mock_client.chat.configure.assert_awaited_once_with(
+        NB_ID, goal=ChatGoal.DEFAULT, response_length=ChatResponseLength.LONGER, custom_prompt=None
+    )
 
 
-async def test_chat_configure_rejects_before_resolving_notebook(mcp_call, mock_client) -> None:
-    """The guard runs BEFORE resolve_notebook: an invalid call by *title* never lists.
+async def test_chat_configure_bare_rejects_before_resolving_notebook(mcp_call, mock_client) -> None:
+    """The surviving BARE-call guard runs BEFORE resolve_notebook: it never lists.
 
     ``NB_ID`` is a full UUID that fast-paths without a ``notebooks.list`` round-trip,
-    so the other rejection tests can't prove ordering. A title forces resolution to
+    so a bare call *by title* is what proves ordering. A title forces resolution to
     call ``client.notebooks.list`` — asserting it stays uncalled pins that the
-    fail-loud guard short-circuits ahead of any network work.
+    fail-loud bare-call guard short-circuits ahead of any network work. (A partial
+    custom call is no longer rejected — it resolves the notebook and merges.)
     """
     mock_client.chat.configure = AsyncMock(return_value=None)
     mock_client.notebooks.list = AsyncMock(
         return_value=[FakeNotebook(id=NB_ID, title="My Notebook")]
     )
     with pytest.raises(ToolError):
-        await mcp_call("chat_configure", {"notebook": "My Notebook", "goal": "tutor"})
+        await mcp_call("chat_configure", {"notebook": "My Notebook"})
     mock_client.notebooks.list.assert_not_called()
     mock_client.chat.configure.assert_not_called()
 
@@ -662,6 +726,7 @@ async def test_suggest_prompts_default_ask(mcp_call, mock_client) -> None:
         return_value=[FakePromptSuggestion(title="T1", prompt="P1")]
     )
     result = await mcp_call("suggest_prompts", {"notebook": NB_ID})
+    assert result.structured_content["notebook_id"] == NB_ID
     assert result.structured_content["suggestions"] == [{"title": "T1", "prompt": "P1"}]
     mock_client.notebooks.suggest_prompts.assert_awaited_once_with(
         NB_ID, source_ids=None, mode=4, query=None
@@ -692,13 +757,15 @@ async def test_suggest_prompts_surface_maps_to_mode(mcp_call, mock_client, surfa
 async def test_suggest_prompts_source_ids_and_query(mcp_call, mock_client) -> None:
     """source_ids resolved once; empty query normalizes to None."""
     mock_client.notebooks.suggest_prompts = AsyncMock(return_value=[])
-    await mcp_call(
+    result = await mcp_call(
         "suggest_prompts",
         {"notebook": NB_ID, "surface": "quiz", "source_ids": [_SRC_A], "query": "risks"},
     )
     kwargs = mock_client.notebooks.suggest_prompts.await_args.kwargs
     assert kwargs["source_ids"] == [_SRC_A]
     assert kwargs["query"] == "risks"
+    # A source-scoped call echoes the resolved canonical source_ids (#1808).
+    assert result.structured_content["source_ids"] == [_SRC_A]
     # Omitted source_ids => None (all); explicit null query is accepted at the
     # schema boundary (query is str | None) and reaches the client as None.
     mock_client.notebooks.suggest_prompts = AsyncMock(return_value=[])

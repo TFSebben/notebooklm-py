@@ -8,7 +8,14 @@ import pytest
 
 from notebooklm import exceptions as exc
 from notebooklm._app.download import DownloadPlanValidationError
-from notebooklm._app.errors import ClassifiedError, ErrorCategory, classify
+from notebooklm._app.errors import (
+    CATEGORY_HINTS,
+    ClassifiedError,
+    ErrorCategory,
+    classify,
+    did_you_mean_hint,
+    is_retriable,
+)
 from notebooklm._app.source_add import SourceAddValidationError
 from notebooklm._app.source_mutations import SourceMutationError
 
@@ -253,3 +260,60 @@ def test_retriable_only_for_transient_categories() -> None:
         result = classify(sample)
         assert result.category is category
         assert result.retriable is (category in transient)
+
+
+def test_classify_retriable_delegates_to_is_retriable() -> None:
+    """``classify`` reads retriability from ``is_retriable`` (single source of truth).
+
+    Rather than re-inlining ``category in _RETRIABLE_CATEGORIES``, ``classify``
+    must agree with :func:`is_retriable` for both transient and deterministic
+    exceptions — so the two never drift.
+    """
+    samples = [
+        exc.RateLimitError("x"),
+        exc.ServerError("x"),
+        exc.NetworkError("x"),
+        exc.AuthError("x"),
+        exc.ValidationError("x"),
+        ValueError("x"),
+    ]
+    for sample in samples:
+        result = classify(sample)
+        assert result.retriable is is_retriable(result.category)
+
+
+def test_category_hints_are_surface_neutral() -> None:
+    """The shared REST+MCP hints must not name a specific tool or CLI command.
+
+    ``CATEGORY_HINTS`` is consumed by BOTH the MCP projector and the REST error
+    body, so a hint that names ``studio_status`` or ``notebooklm login`` would be
+    wrong on the other surface. Guards the F2 neutralization.
+    """
+    banned = ("studio_status", "notebooklm ", "`")
+    for category, hint in CATEGORY_HINTS.items():
+        if hint is None:
+            continue
+        for token in banned:
+            assert token not in hint, (
+                f"{category} hint leaks surface-specific token {token!r}: {hint}"
+            )
+    assert CATEGORY_HINTS[ErrorCategory.AUTH] == "Re-authenticate and retry."
+    assert "task status" in CATEGORY_HINTS[ErrorCategory.ARTIFACT_TIMEOUT]
+
+
+# --- did_you_mean_hint (issue #1787) ---------------------------------------
+
+
+def test_did_you_mean_hint_includes_id_and_title() -> None:
+    """The hint carries id AND title so a flat-string MCP client can retry by id."""
+    hint = did_you_mean_hint([{"id": "abc123", "title": "Scientific PDF Parsing"}])
+    assert hint.startswith("Did you mean:")
+    assert "abc123" in hint
+    assert "Scientific PDF Parsing" in hint
+    assert hint.endswith("Pass the full title or id.")
+
+
+def test_did_you_mean_hint_lists_multiple_candidates() -> None:
+    hint = did_you_mean_hint([{"id": "id1", "title": "Alpha"}, {"id": "id2", "title": "Beta"}])
+    assert "id1" in hint and "id2" in hint
+    assert "Alpha" in hint and "Beta" in hint
